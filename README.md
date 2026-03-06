@@ -41,6 +41,7 @@ pH / OD / ...
 - [x] **Exploración inicial de datos** — Carga y análisis del CSV raw de la estación Yeguas (`2026-03-04`).
 - [x] **Pipeline de limpieza** (`csv_cleaner.py`) — Eliminación de picos con ventana móvil (±3σ), interpolación lineal, corte de datos tras el 17-02-2026.
 - [x] **Primer modelo LSTM** (`model_trainning.py`) — Ventanas de 48 pasos, escalado dual X/Y, arquitectura LSTM → Dropout → Dense → Dense(1).
+- [x] **Investigación de modelos** — Análisis de correlaciones, evaluación de alternativas al LSTM, descarte de regresión lineal por requisito de negocio. Ver [`model_selection.md`](model_selection.md).
 
 ### 🔄 En progreso
 

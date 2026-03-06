@@ -1,10 +1,19 @@
 import pandas as pd
 import numpy as np
 import tensorflow as tf
+import mlflow
+import mlflow.tensorflow
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
-from sklearn.metrics import r2_score
+from sklearn.metrics import r2_score, mean_absolute_error
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
+
+# ── MLflow: experimento de producción ─────────────────────────────────────────
+mlflow.set_tracking_uri("mlruns")
+mlflow.set_experiment("nitrate_nowcasting_production")
+
+# TF autolog registra arquitectura, curvas de loss y el modelo automáticamente
+mlflow.tensorflow.autolog(log_models=True, log_datasets=False, silent=True)
 
 # 1. Cargar y limpiar datos
 df = pd.read_csv("YEGUAS_data.csv")
@@ -63,25 +72,51 @@ model = Sequential([
 optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
 model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
 
-# 7. ENTRENAMIENTO (con parada temprana para no quemar ciclos si ya no mejora)
-early_stop = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True)
-print("Entrenando Red Neuronal TensorFlow...")
-history = model.fit(
-    X_train, y_train, 
-    epochs=100, 
-    batch_size=32, 
-    validation_split=0.15, 
-    callbacks=[early_stop], 
-    verbose=1
-)
+# ─────────────────────────────────────────────────────────────────────────────
+with mlflow.start_run(run_name="LSTM_baseline") as run:
+    # 7. Registrar hiperparámetros manualmente (complementa autolog)
+    mlflow.log_params({
+        "model_type":        "LSTM",
+        "window_size":       window_size,
+        "lstm_units":        64,
+        "dropout":           0.2,
+        "dense_units":       32,
+        "epochs":            100,
+        "batch_size":        32,
+        "learning_rate":     0.001,
+        "early_stop_patience": 15,
+        "train_size":        split_idx,
+        "test_size":         len(X_seq) - split_idx,
+        "n_features":        X_scaled.shape[1],
+    })
 
-# 8. PREDECIR Y EVALUAR
-# Desescalamos las predicciones para verlas en mg/L reales
-y_pred_scaled = model.predict(X_test).flatten()
-y_pred_real = y_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
-y_test_real = y_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
+    # 8. ENTRENAMIENTO (con parada temprana para no quemar ciclos si ya no mejora)
+    early_stop = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True)
+    print("Entrenando Red Neuronal TensorFlow...")
+    history = model.fit(
+        X_train, y_train,
+        epochs=100,
+        batch_size=32,
+        validation_split=0.15,
+        callbacks=[early_stop],
+        verbose=1
+    )
 
-from sklearn.metrics import mean_absolute_error
-error = mean_absolute_error(y_test_real, y_pred_real)
-print(f"Error MAE Final en Producción: {error:.2f} mg/L")
-print(f"R²: {r2_score(y_test_real, y_pred_real):.4f}")
+    # 9. PREDECIR Y EVALUAR
+    y_pred_scaled = model.predict(X_test).flatten()
+    y_pred_real = y_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
+    y_test_real = y_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
+
+    test_mae = mean_absolute_error(y_test_real, y_pred_real)
+    test_r2  = r2_score(y_test_real, y_pred_real)
+
+    # Registrar métricas finales de producción
+    mlflow.log_metrics({
+        "test_mae": float(test_mae),
+        "test_r2":  float(test_r2),
+    })
+
+    print(f"Error MAE Final en Producción: {test_mae:.2f} mg/L")
+    print(f"R²: {test_r2:.4f}")
+    print(f"MLflow Run ID: {run.info.run_id}")
+    print("Para visualizar: ejecuta `mlflow ui` en la terminal")
