@@ -1,0 +1,29 @@
+{
+  "model_name": "nitrate_nowcasting_best_01",
+  "model_version": "2",
+  "run_name": "C_CNN_LSTM_best",
+  "run_id": "98cb84a0f6e74d7097266629916fecb1",
+  "window": 24,
+  "lag_steps": [
+    1,
+    2,
+    4
+  ],
+  "features": [
+    "C4E_conductivity",
+    "C4E_temperature",
+    "NTU_fnu",
+    "NTU_mgL",
+    "NTU_ntu",
+    "NTU_temperature",
+    "OPTOD_mgL",
+    "OPTOD_ppm",
+    "OPTOD_saturation",
+    "OPTOD_temperature",
+    "hour_sin",
+    "hour_cos"
+  ],
+  "mae_last3_folds": 6.417619148890178,
+  "r2_last3_folds": -189.05633640289307,
+  "created": "2026-03-09T10:08:56.438309"
+}
