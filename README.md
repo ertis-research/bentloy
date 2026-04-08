@@ -48,6 +48,35 @@ pH / OD / ...
 - [ ] Evaluación de métricas del modelo (R², MAE, RMSE).
 - [ ] Visualización de predicciones vs valores reales.
 
+---
+
+## 📈 Artefactos en MLflow
+
+El notebook [prueba_entrenamiento.ipynb](prueba_entrenamiento.ipynb) registra:
+
+- métricas finales del entrenamiento,
+- gráficas de predicción como artefactos HTML en `plots/` dentro del run,
+- copia local de gráficas en `outputs/artifacts/plots/`.
+
+Esto permite revisar resultados en MLflow UI y conservarlos también en disco.
+
+---
+
+## 🚀 Serving con BentoML
+
+Se añadió un servicio de inferencia en [src/bento_service.py](src/bento_service.py) y su configuración en [bentofile.yaml](bentofile.yaml).
+
+Guía de arranque:
+
+- [docs/bentoml_yatai_quickstart.md](docs/bentoml_yatai_quickstart.md)
+- [docs/mlflow_to_k8s_workflow.md](docs/mlflow_to_k8s_workflow.md)
+
+Incluye:
+
+- ejecución local del servicio,
+- build del Bento,
+- primer despliegue con Yatai sobre Kubernetes.
+
 ### 🗓️ Pendiente
 
 - [ ] Análisis de importancia de variables (permutation importance / SHAP).

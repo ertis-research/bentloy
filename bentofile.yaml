@@ -1,0 +1,16 @@
+service: "src.bento_service:NitrateGRUService"
+labels:
+  owner: nitrate-team
+  project: nitrate-nowcasting
+include:
+  - "src/**/*.py"
+  - "test_models/*.h5"
+  - "test_models/*.pkl"
+  - "test_models/*.json"
+python:
+  packages:
+    - bentoml>=1.3.18
+    - tensorflow>=2.20.0
+    - numpy>=2.2.6
+    - scikit-learn >=1.3.2
+    - pandas >=2.2.3

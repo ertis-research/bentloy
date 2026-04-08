@@ -1,0 +1,14 @@
+[
+  "C4E_conductivity",
+  "C4E_salinity",
+  "C4E_tds",
+  "C4E_temperature",
+  "NTU_fnu",
+  "NTU_mgL",
+  "NTU_ntu",
+  "NTU_temperature",
+  "OPTOD_mgL",
+  "OPTOD_ppm",
+  "OPTOD_saturation",
+  "OPTOD_temperature"
+]
