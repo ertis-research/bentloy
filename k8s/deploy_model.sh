@@ -8,7 +8,7 @@ fi
 
 MODEL_NAME="$1"
 MODEL_VERSION="${2:-latest}"
-NAMESPACE="${3:-${K8S_NAMESPACE:-ml-serving}}"
+NAMESPACE="${3:-${K8S_NAMESPACE:-api-models}}"
 REPLICAS="${4:-1}"
 
 if [[ -f .env ]]; then
@@ -19,9 +19,10 @@ fi
 MODEL_SERVICE_IMAGE="${MODEL_SERVICE_IMAGE:-model-service:latest}"
 MODEL_SERVICE_PREFIX="${MODEL_SERVICE_PREFIX:-model}"
 MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-}"
+MODEL_URI="${MODEL_URI:-}"
 
-if [[ -z "$MLFLOW_TRACKING_URI" ]]; then
-  echo "Error: MLFLOW_TRACKING_URI is not set (in .env or environment)."
+if [[ -z "$MLFLOW_TRACKING_URI" && -z "$MODEL_URI" ]]; then
+  echo "Error: set MLFLOW_TRACKING_URI or MODEL_URI (in .env or environment)."
   exit 1
 fi
 
@@ -40,6 +41,15 @@ to_slug() {
 MODEL_SLUG="$(to_slug "$MODEL_NAME")"
 DEPLOY_NAME="${MODEL_SERVICE_PREFIX}-${MODEL_SLUG}"
 SERVICE_NAME="${MODEL_SERVICE_PREFIX}-${MODEL_SLUG}"
+
+MODEL_URI_ENV_BLOCK=""
+if [[ -n "$MODEL_URI" ]]; then
+  MODEL_URI_ENV_BLOCK=$(cat <<EOF
+            - name: MODEL_URI
+              value: "${MODEL_URI}"
+EOF
+)
+fi
 
 kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 || kubectl create namespace "$NAMESPACE"
 
@@ -77,15 +87,16 @@ spec:
               value: "${MODEL_NAME}"
             - name: MODEL_VERSION
               value: "${MODEL_VERSION}"
+${MODEL_URI_ENV_BLOCK}
           readinessProbe:
             httpGet:
-              path: /health
+              path: /readyz
               port: 3000
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /health
+              path: /livez
               port: 3000
             initialDelaySeconds: 20
             periodSeconds: 15

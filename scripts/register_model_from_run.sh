@@ -18,7 +18,7 @@ if [[ -f .env ]]; then
 fi
 
 MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-}"
-K8S_NAMESPACE="${K8S_NAMESPACE:-ml-serving}"
+K8S_NAMESPACE="${K8S_NAMESPACE:-api-models}"
 
 if [[ -z "$MLFLOW_TRACKING_URI" ]]; then
   echo "Error: MLFLOW_TRACKING_URI is not set (in .env or environment)."

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NAMESPACE="${1:-${K8S_NAMESPACE:-ml-serving}}"
+NAMESPACE="${1:-${K8S_NAMESPACE:-api-models}}"
 
 if [[ -f .env ]]; then
   # shellcheck disable=SC1091
@@ -21,6 +21,36 @@ fi
 kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 || kubectl create namespace "$NAMESPACE"
 
 cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gateway-sa
+  namespace: ${NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gateway-service-discovery
+  namespace: ${NAMESPACE}
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gateway-service-discovery
+  namespace: ${NAMESPACE}
+subjects:
+  - kind: ServiceAccount
+    name: gateway-sa
+    namespace: ${NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gateway-service-discovery
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -38,6 +68,7 @@ spec:
       labels:
         app: gateway
     spec:
+      serviceAccountName: gateway-sa
       containers:
         - name: gateway
           image: ${GATEWAY_IMAGE}
@@ -53,13 +84,13 @@ spec:
               value: "${MODEL_URL_TEMPLATE}"
           readinessProbe:
             httpGet:
-              path: /health
+              path: /readyz
               port: 3000
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /health
+              path: /livez
               port: 3000
             initialDelaySeconds: 20
             periodSeconds: 15
