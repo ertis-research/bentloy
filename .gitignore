@@ -1,17 +1,28 @@
-# Python
+# Python artifacts
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-.python-version
-*.toml
-*.lock
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# Virtual environments
+# Virtual environments and local tooling cache
+.venv/
+.uv-cache/
+
+# Notebook metadata
+.ipynb_checkpoints/
+
+# Local environment files
 .env
+.env.*
+!.env_example
 
-# Temporary files
+# Temporary/OS files
 *.tmp
 *.bak
 *.log
+.DS_Store
+Thumbs.db

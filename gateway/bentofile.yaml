@@ -1,5 +1,5 @@
 service: "service:GatewayService"
-description: "Gateway BentoML para enrutar predicciones a modelos desplegados"
+description: "BentoML gateway that routes predictions to deployed models"
 include:
   - "service.py"
 python:

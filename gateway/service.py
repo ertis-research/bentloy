@@ -8,17 +8,17 @@ import httpx
 
 @bentoml.service(resources={"cpu": "1"}, traffic={"timeout": 60})
 class GatewayService:
-    """API Gateway para enrutar predicciones a multiples modelos."""
+    """API gateway that routes predictions to multiple models."""
 
     def __init__(self):
-        # Mapeo explicito por variables de entorno tipo MODELO_FOO_URL=http://...:3000
+        # Explicit mapping via environment variables like MODELO_FOO_URL=http://...:3000
         self.model_urls: dict[str, str] = {}
         for key, value in os.environ.items():
             if key.endswith("_URL") and key.startswith("MODELO_"):
                 model_name = key.replace("MODELO_", "").replace("_URL", "").lower()
                 self.model_urls[model_name] = value
 
-        # Resolucion dinamica por convencion para servicios de Kubernetes.
+        # Dynamic resolution using Kubernetes service naming conventions.
         self.model_service_prefix = os.getenv("MODEL_SERVICE_PREFIX", "model")
         self.model_namespace = os.getenv("MODEL_NAMESPACE", "default")
         self.model_url_template = os.getenv(
@@ -26,10 +26,10 @@ class GatewayService:
             "http://{service_name}:3000",
         )
 
-        # Guarda modelos vistos en peticiones predict/batch_predict.
+        # Stores models observed in predict/batch_predict calls.
         self.recently_routed_models: dict[str, str] = {}
 
-        print(f"Modelos configurados por env: {list(self.model_urls.keys())}")
+        print(f"Configured models from env: {list(self.model_urls.keys())}")
 
     def _to_model_slug(self, model_name: str) -> str:
         slug = model_name.strip().lower().replace("_", "-")
@@ -59,8 +59,8 @@ class GatewayService:
 
     async def _discover_k8s_model_services(self) -> tuple[list[dict[str, str]], str | None]:
         """
-        Descubre servicios tipo model-<slug> usando la API de Kubernetes desde dentro del pod.
-        Si no se puede consultar (RBAC, fuera de cluster, etc.), devuelve error descriptivo.
+        Discover model-<slug> services using Kubernetes API from inside the pod.
+        If discovery is not possible (RBAC, outside cluster, etc.), return a descriptive error.
         """
         kube_host = os.getenv("KUBERNETES_SERVICE_HOST")
         kube_port = os.getenv("KUBERNETES_SERVICE_PORT_HTTPS", "443")
@@ -68,16 +68,16 @@ class GatewayService:
         ca_path = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
         if not kube_host:
-            return [], "KUBERNETES_SERVICE_HOST no disponible (fuera de cluster o sin DNS de servicio)."
+            return [], "KUBERNETES_SERVICE_HOST is not available (outside cluster or missing service DNS)."
 
         if not os.path.exists(token_path):
-            return [], "Token de ServiceAccount no disponible para consultar la API de Kubernetes."
+            return [], "ServiceAccount token is not available to query the Kubernetes API."
 
         with open(token_path, "r", encoding="utf-8") as file_handle:
             token = file_handle.read().strip()
 
         if not token:
-            return [], "Token de ServiceAccount vacio."
+            return [], "ServiceAccount token is empty."
 
         verify: str | bool = ca_path if os.path.exists(ca_path) else False
         base_url = f"https://{kube_host}:{kube_port}"
@@ -90,7 +90,7 @@ class GatewayService:
                 response.raise_for_status()
                 items = response.json().get("items", [])
         except Exception as exc:
-            return [], f"No se pudo descubrir servicios en Kubernetes: {exc}"
+            return [], f"Could not discover Kubernetes services: {exc}"
 
         prefix = f"{self.model_service_prefix}-"
         discovered: list[dict[str, str]] = []
@@ -124,10 +124,10 @@ class GatewayService:
     @bentoml.api
     async def predict(self, model_name: str, data: dict[str, Any]) -> dict[str, Any]:
         """
-        Input esperado por gateway:
+        Expected gateway input:
         {
-          "model_name": "mi_modelo",
-          "data": { ... payload del modelo ... }
+          "model_name": "my_model",
+          "data": { ... model payload ... }
         }
         """
         try:
@@ -136,7 +136,7 @@ class GatewayService:
             url = f"{base_url}/predict"
 
             async with httpx.AsyncClient(timeout=30.0) as client:
-                # model_service expone `predict(data: dict)`, por lo que espera {"data": {...}}
+                # model_service exposes `predict(data: dict)`, so it expects {"data": {...}}
                 response = await client.post(url, json={"data": data})
                 response.raise_for_status()
                 return response.json()
@@ -148,12 +148,12 @@ class GatewayService:
                 "error": str(exc),
                 "model": model_name,
                 "configured_models": list(self.model_urls.keys()),
-                "hint": "Verifica que el servicio del modelo este desplegado y accesible",
+                "hint": "Verify that the model service is deployed and reachable",
             }
 
     @bentoml.api
     async def batch_predict(self, requests: list[dict]) -> dict[str, Any]:
-        """Predicciones en lote."""
+        """Batch predictions."""
         results = []
 
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -163,7 +163,7 @@ class GatewayService:
 
                 try:
                     if not model_name:
-                        results.append({"error": "model_name es obligatorio"})
+                        results.append({"error": "model_name is required"})
                         continue
 
                     base_url, _ = self._resolve_model_base_url(model_name)
@@ -179,7 +179,7 @@ class GatewayService:
 
     @bentoml.api
     async def health(self) -> dict[str, Any]:
-        """Health check de modelos configurados explicitamente por env."""
+        """Health check for models explicitly configured by env."""
         health_status = {}
 
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -205,7 +205,7 @@ class GatewayService:
 
     @bentoml.api
     async def list_models(self) -> dict[str, Any]:
-        """Lista modelos disponibles por tres fuentes: env, trafico reciente y discovery de Kubernetes."""
+        """List available models from env config, recent traffic, and Kubernetes discovery."""
         configured_endpoints = {
             name: f"{url}/predict" for name, url in self.model_urls.items()
         }
@@ -235,7 +235,10 @@ class GatewayService:
                 "service_prefix": self.model_service_prefix,
                 "url_template": self.model_url_template,
                 "namespace": self.model_namespace,
-                "how_to_call": "Si model_name no esta en configured_models, se resuelve por convencion model-<slug>.",
+                "how_to_call": (
+                    "If model_name is not in configured_models, "
+                    "it is resolved using model-<slug> convention."
+                ),
             },
             "discovery": {
                 "source": "kubernetes_services",

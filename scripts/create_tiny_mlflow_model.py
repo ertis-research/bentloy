@@ -25,7 +25,7 @@ class TinyModelResult:
 
 
 def build_tiny_regression() -> LinearRegression:
-    # Dataset pequeno y deterministico para demo.
+    # Small deterministic dataset for demo purposes.
     # y = 2*x1 + 0.5*x2 - x3 + 3
     x = np.array(
         [
@@ -51,7 +51,7 @@ def transition_stage(
     version: str,
     stage: str,
 ) -> None:
-    # API legacy pero compatible con MLflow Registry actual.
+    # Legacy API but still compatible with current MLflow Registry.
     client.transition_model_version_stage(
         name=model_name,
         version=version,
@@ -117,45 +117,45 @@ def create_and_register_tiny_model(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Crea un modelo tiny de regresion, lo guarda en MLflow y opcionalmente lo "
-            "registra en MLflow Model Registry."
+            "Create a tiny regression model, store it in MLflow, and optionally "
+            "register it in MLflow Model Registry."
         )
     )
     parser.add_argument(
         "--tracking-uri",
         default=os.getenv("MLFLOW_TRACKING_URI", ""),
-        help="URI de MLflow Tracking. Si no se pasa, usa MLFLOW_TRACKING_URI.",
+        help="MLflow Tracking URI. If omitted, it uses MLFLOW_TRACKING_URI.",
     )
     parser.add_argument(
         "--experiment-name",
         default="tiny-model-demo",
-        help="Nombre del experimento MLflow.",
+        help="MLflow experiment name.",
     )
     parser.add_argument(
         "--run-name",
         default="tiny-linear-regression",
-        help="Nombre del run MLflow.",
+        help="MLflow run name.",
     )
     parser.add_argument(
         "--artifact-path",
         default="model",
-        help="Ruta de artefacto dentro del run (normalmente 'model').",
+        help="Artifact path inside the run (usually 'model').",
     )
     parser.add_argument(
         "--registered-model-name",
         default="tiny_demo_model",
-        help="Nombre de modelo en Registry. Usa '' para no registrar.",
+        help="Registry model name. Use '' to skip registration.",
     )
     parser.add_argument(
         "--stage",
         default="Production",
-        help="Stage al que mover la version registrada. Usa '' para no mover stage.",
+        help="Stage to move the registered version into. Use '' to skip stage transition.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
-    # Evita errores de encoding en terminales Windows cp1252 cuando MLflow imprime emojis.
+    # Avoid encoding issues on Windows cp1252 terminals when MLflow prints emojis.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if hasattr(sys.stderr, "reconfigure"):
@@ -165,7 +165,7 @@ def main() -> None:
 
     if not args.tracking_uri:
         raise SystemExit(
-            "Falta --tracking-uri y no existe MLFLOW_TRACKING_URI en entorno."
+            "Missing --tracking-uri and MLFLOW_TRACKING_URI is not set in the environment."
         )
 
     registered_model_name = args.registered_model_name.strip() or None
@@ -182,7 +182,7 @@ def main() -> None:
 
     print(json.dumps(asdict(result), indent=2))
 
-    print("\nSiguiente paso sugerido para deploy en k8s:")
+    print("\nSuggested next step for K8s deployment:")
     if result.registered_model_name:
         print(
             f"./k8s/deploy_model.sh {result.registered_model_name} latest api-models 1"

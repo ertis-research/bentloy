@@ -1,86 +1,69 @@
-# 🧪 NITRATE_model
+# NITRATE_model
 
-> **Nowcasting de nitratos en agua** mediante redes neuronales LSTM a partir de sensores multiparámetro en tiempo real.
+REST API for serving MLflow models on Kubernetes using BentoML.
 
----
+This repository is now focused on model serving infrastructure (gateway + per-model services), not on nitrate model research/training.
 
-## 🎯 Objetivo
+## Project structure
 
-Construir un modelo de **Nowcasting** capaz de **estimar la concentración de nitratos** (NO₃⁻ en mg/L) en la estación de **Yeguas** usando únicamente las lecturas simultáneas de los **demás sensores fisicoquímicos** (turbidez, conductividad, pH, temperatura, oxígeno disuelto…).
+- `gateway/`: API gateway service that routes `/predict` requests by `model_name`.
+- `model_service/`: Generic BentoML service that loads one MLflow model.
+- `k8s/`: Deployment and image build scripts (`.sh` and `.ps1`).
+- `scripts/`: Utilities for model registry and REST API validation.
+- `examples/rest/`: Request payload samples.
+- `docs/`: Workflow and operational notes.
+- `legacy/nitrate_research/`: Archived research/training assets from the old nitrate-focused workflow.
 
-La idea es que, ante una medición puntual de todos los parámetros, el modelo sea capaz de inferir el nivel de nitrato **sin necesidad del sensor de nitratos**, aprovechando las correlaciones entre variables.
+## Quick start
 
+1. Create local config from `.env_example` and set at least:
+   - `MLFLOW_TRACKING_URI`
+   - `K8S_NAMESPACE` (default: `api-models`)
+2. Build images:
+   - Bash: `./k8s/build_images.sh latest`
+   - PowerShell: `.\\k8s\\build_images.ps1 -Tag latest`
+3. Deploy gateway (once per namespace):
+   - Bash: `./k8s/deploy_gateway.sh api-models`
+   - PowerShell: `.\\k8s\\deploy_gateway.ps1 -Namespace api-models`
+4. Deploy one model:
+   - Bash: `./k8s/deploy_model.sh <MODEL_NAME> latest api-models 1`
+   - PowerShell: `.\\k8s\\deploy_model.ps1 -ModelName <MODEL_NAME> -ModelVersion latest -Namespace api-models -Replicas 1`
+5. Test REST API:
+   - PowerShell smoke test: `.\\scripts\\test_models_rest_api.ps1 -GatewayUrl "http://localhost:8000"`
+
+If `gateway` is not externally reachable, use:
+
+```bash
+kubectl -n api-models port-forward svc/gateway 8000:8000
 ```
-Sensores (X)  ──►  [ LSTM Nowcasting ]  ──►  NO₃⁻ estimado (ŷ)
-temperatura
-conductividad
-turbidez
-pH / OD / ...
+
+## REST API example
+
+```bash
+curl -X POST "http://localhost:8000/predict" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model_name": "tiny_demo_model",
+    "data": {"features": [1.0, 2.0, 3.0]}
+  }'
 ```
 
----
+List discovered/configured models:
 
-## 🔬 Arquitectura del modelo
+```bash
+curl -X POST "http://localhost:8000/list_models" \\
+  -H "Content-Type: application/json" \\
+  -d '{}'
+```
 
-| Componente | Detalle |
-|---|---|
-| Tipo de modelo | LSTM (Long Short-Term Memory) |
-| Ventana temporal | 24 h → 48 pasos de 30 min |
-| Variable objetivo | `NITRATE_nitrate_no3_mg_l` |
-| Escalado features | `StandardScaler` |
-| Escalado target | `MinMaxScaler` |
-| Regularización | Dropout 20 % |
-| Split | 80 % train / 20 % test (cronológico) |
+## Notes
 
----
+- `MODEL_VERSION=latest` resolves to:
+  1. Highest version in `Production` stage, if available.
+  2. Otherwise highest numeric registered version.
+- You can bypass registry version resolution with `MODEL_URI` (for example `runs:/<RUN_ID>/model`).
 
-## 📋 Registro de trabajo
+## Documentation
 
-### ✅ Hecho
-
-- [x] **Exploración inicial de datos** — Carga y análisis del CSV raw de la estación Yeguas (`2026-03-04`).
-- [x] **Pipeline de limpieza** (`csv_cleaner.py`) — Eliminación de picos con ventana móvil (±3σ), interpolación lineal, corte de datos tras el 17-02-2026.
-- [x] **Primer modelo LSTM** (`model_trainning.py`) — Ventanas de 48 pasos, escalado dual X/Y, arquitectura LSTM → Dropout → Dense → Dense(1).
-- [x] **Investigación de modelos** — Análisis de correlaciones, evaluación de alternativas al LSTM, descarte de regresión lineal por requisito de negocio. Ver [`model_selection.md`](model_selection.md).
-
-### 🔄 En progreso
-
-- [ ] Evaluación de métricas del modelo (R², MAE, RMSE).
-- [ ] Visualización de predicciones vs valores reales.
-
----
-
-## 📈 Artefactos en MLflow
-
-El notebook [prueba_entrenamiento.ipynb](prueba_entrenamiento.ipynb) registra:
-
-- métricas finales del entrenamiento,
-- gráficas de predicción como artefactos HTML en `plots/` dentro del run,
-- copia local de gráficas en `outputs/artifacts/plots/`.
-
-Esto permite revisar resultados en MLflow UI y conservarlos también en disco.
-
----
-
-## 🚀 Serving con BentoML
-
-Se añadió un servicio de inferencia en [src/bento_service.py](src/bento_service.py) y su configuración en [bentofile.yaml](bentofile.yaml).
-
-Guía de arranque:
-
-- [docs/bentoml_yatai_quickstart.md](docs/bentoml_yatai_quickstart.md)
-- [docs/mlflow_to_k8s_workflow.md](docs/mlflow_to_k8s_workflow.md)
-
-Incluye:
-
-- ejecución local del servicio,
-- build del Bento,
-- primer despliegue con Yatai sobre Kubernetes.
-
-### 🗓️ Pendiente
-
-- [ ] Análisis de importancia de variables (permutation importance / SHAP).
-- [ ] Optimización de hiperparámetros (nº capas, window size, unidades LSTM).
-- [ ] Validación cruzada temporal (walk-forward validation).
-- [ ] Exportación del modelo entrenado (`.keras` / ONNX).
-- [ ] Documentar dependencias en `requirements.txt`.
+- Kubernetes + MLflow workflow: `docs/mlflow_to_k8s_workflow.md`
+- Change log and execution notes: `docs/cambios_k8s_2026-04-08.md`
