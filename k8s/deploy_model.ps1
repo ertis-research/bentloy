@@ -37,7 +37,10 @@ function Import-DotEnv {
             $value = $value.Substring(1, $value.Length - 2)
         }
 
-        Set-Item -Path ("Env:{0}" -f $key) -Value $value
+        $existingValue = [Environment]::GetEnvironmentVariable($key)
+        if ([string]::IsNullOrEmpty($existingValue)) {
+            Set-Item -Path ("Env:{0}" -f $key) -Value $value
+        }
     }
 }
 
@@ -51,6 +54,16 @@ function To-Slug {
     return $slug
 }
 
+function Test-ValidK8sName {
+    param([string]$Value)
+    return [Regex]::IsMatch($Value, "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+}
+
+function Test-ValidImageRef {
+    param([string]$Value)
+    return [Regex]::IsMatch($Value, "^[a-z0-9./:_-]+$")
+}
+
 Import-DotEnv
 
 if ([string]::IsNullOrWhiteSpace($Namespace)) {
@@ -61,6 +74,16 @@ $modelServiceImage = if ($env:MODEL_SERVICE_IMAGE) { $env:MODEL_SERVICE_IMAGE } 
 $modelServicePrefix = if ($env:MODEL_SERVICE_PREFIX) { $env:MODEL_SERVICE_PREFIX } else { "model" }
 $mlflowTrackingUri = if ($env:MLFLOW_TRACKING_URI) { $env:MLFLOW_TRACKING_URI } else { "" }
 $modelUri = if ($env:MODEL_URI) { $env:MODEL_URI } else { "" }
+$modelRegistrySecret = if ($env:MODEL_REGISTRY_SECRET) { $env:MODEL_REGISTRY_SECRET } else { "" }
+
+# If the image points to a remote registry and no pull secret was provided,
+# default to the standard secret used in this project.
+if (
+    [string]::IsNullOrWhiteSpace($modelRegistrySecret) -and
+    [Regex]::IsMatch($modelServiceImage, "^[a-z0-9.-]+(:[0-9]+)?/")
+) {
+    $modelRegistrySecret = "model-registry-creds"
+}
 
 if ([string]::IsNullOrWhiteSpace($mlflowTrackingUri) -and [string]::IsNullOrWhiteSpace($modelUri)) {
     throw "Error: set MLFLOW_TRACKING_URI or MODEL_URI (in .env or environment)."
@@ -73,6 +96,22 @@ if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
 $modelSlug = To-Slug -Text $ModelName
 $deployName = "{0}-{1}" -f $modelServicePrefix, $modelSlug
 $serviceName = "{0}-{1}" -f $modelServicePrefix, $modelSlug
+
+if ([string]::IsNullOrWhiteSpace($modelSlug)) {
+    throw "MODEL_NAME produced an empty slug."
+}
+if (-not (Test-ValidK8sName -Value $Namespace)) {
+    throw "Invalid namespace '$Namespace'."
+}
+if (-not (Test-ValidK8sName -Value $modelSlug)) {
+    throw "Invalid model slug '$modelSlug'."
+}
+if (-not (Test-ValidImageRef -Value $modelServiceImage)) {
+    throw "Invalid MODEL_SERVICE_IMAGE '$modelServiceImage'."
+}
+if (-not [string]::IsNullOrWhiteSpace($modelRegistrySecret) -and -not (Test-ValidK8sName -Value $modelRegistrySecret)) {
+    throw "Invalid MODEL_REGISTRY_SECRET '$modelRegistrySecret'."
+}
 
 $namespaceExists = $true
 try {
@@ -100,6 +139,14 @@ if (-not [string]::IsNullOrWhiteSpace($modelUri)) {
 "@
 }
 
+$imagePullSecretsBlock = ""
+if (-not [string]::IsNullOrWhiteSpace($modelRegistrySecret)) {
+    $imagePullSecretsBlock = @"
+      imagePullSecrets:
+        - name: $modelRegistrySecret
+"@
+}
+
 $manifest = @"
 apiVersion: apps/v1
 kind: Deployment
@@ -121,6 +168,7 @@ spec:
         app: model-service
         model-slug: $modelSlug
     spec:
+$imagePullSecretsBlock
       containers:
         - name: model-service
           image: $modelServiceImage

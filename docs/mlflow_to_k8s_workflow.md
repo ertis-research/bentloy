@@ -8,6 +8,11 @@ Este flujo permite:
 
 Nota: este flujo es Kubernetes-only (no usa Docker Compose).
 
+Plan de la nueva arquitectura (imagen por modelo + endpoint asincrono):
+
+- `docs/model_image_automation_plan.md`
+- Historial por fase: `docs/phases/README.md`
+
 ## PowerShell (Windows)
 
 Si no puedes ejecutar `.sh`, usa estos equivalentes `.ps1`:
@@ -19,11 +24,59 @@ Si no puedes ejecutar `.sh`, usa estos equivalentes `.ps1`:
 .\scripts\register_model_from_run.ps1 -ModelName my_model -RunId <RUN_ID> -ArtifactPath model -TargetStage Production
 ```
 
+Wrapper unificado (recomendado):
+
+```powershell
+.\k8s\workflow.ps1 -Action bootstrap -Tag latest -Namespace api-models
+.\k8s\workflow.ps1 -Action deploy-model -ModelName my_model -ModelVersion latest -Namespace api-models
+.\k8s\workflow.ps1 -Action full -ModelName my_model -Tag latest -Namespace api-models
+```
+
 Si PowerShell bloquea scripts locales:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 ```
+
+## Wrapper unificado (.sh y .ps1)
+
+Estos wrappers reutilizan los scripts existentes (`build_images`, `deploy_gateway`, `deploy_model`) y te dan un solo punto de entrada.
+
+### Bash
+
+```bash
+./k8s/workflow.sh bootstrap --tag latest --namespace api-models
+./k8s/workflow.sh deploy-model --model-name my_model --model-version latest --namespace api-models
+./k8s/workflow.sh full --model-name my_model --tag latest --namespace api-models
+```
+
+### PowerShell
+
+```powershell
+.\k8s\workflow.ps1 -Action bootstrap -Tag latest -Namespace api-models
+.\k8s\workflow.ps1 -Action deploy-model -ModelName my_model -ModelVersion latest -Namespace api-models
+.\k8s\workflow.ps1 -Action full -ModelName my_model -Tag latest -Namespace api-models
+```
+
+Notas:
+
+- `bootstrap`: build (opcional) + deploy gateway.
+- `deploy-model`: despliega/actualiza un modelo.
+- `full`: ejecuta `bootstrap` + `deploy-model`.
+- Puedes saltar pasos con `--skip-build` / `--skip-gateway` (o `-SkipBuild` / `-SkipGateway` en PowerShell).
+
+## Fase 1 (imagen por modelo en K8s)
+
+Scripts nuevos:
+
+- `k8s/bootstrap/create_registry_secret.*`
+- `k8s/bootstrap/build_model_base_image.*`
+- `k8s/build_model_image_job.*`
+- `k8s/deploy_model_image.*`
+
+Guia paso a paso:
+
+- `docs/phases/phase_01_infra.md`
 
 ## 1) Prerequisitos
 
@@ -43,9 +96,9 @@ Desde la raiz del repo:
 Si necesitas subir a registry remoto:
 
 ```bash
-./k8s/build_images.sh v1 ghcr.io/TU_ORG
-export GATEWAY_IMAGE=ghcr.io/TU_ORG/model-gateway:v1
-export MODEL_SERVICE_IMAGE=ghcr.io/TU_ORG/model-service:v1
+./k8s/build_images.sh v1 registry.example.com/TU_ORG
+export GATEWAY_IMAGE=registry.example.com/TU_ORG/model-gateway:v1
+export MODEL_SERVICE_IMAGE=registry.example.com/TU_ORG/model-service:v1
 ```
 
 ## 3) Desplegar gateway una sola vez (una vez hecho por primera vez, ya no hace falta hacerlo nunca más)
@@ -261,9 +314,25 @@ export MODEL_URI=runs:/<RUN_ID>/model
 ./k8s/deploy_model.sh my_model latest api-models 1
 ```
 
-## 11) Como obtener TU_ORG (para ghcr.io/TU_ORG)
+## 11) Como definir REGISTRY_SERVER y TU_ORG
 
-`TU_ORG` es el owner en GitHub donde vas a publicar imagenes (`usuario` u `organizacion`).
+`TU_ORG` es el proyecto/namespace dentro del registry donde vas a publicar imagenes.
+
+`REGISTRY_SERVER` debe ser el host del registry (sin protocolo ni rutas).
+
+Ejemplo Harbor:
+
+```bash
+export REGISTRY_SERVER=registry.example.com
+export TU_ORG=mi-proyecto
+```
+
+Importante:
+
+- Si partes de una URL de UI como `https://registry.example.com/harbor/projects`, usa solo `registry.example.com` como `REGISTRY_SERVER`.
+- El flujo no fija un registry por defecto.
+
+Si usas GHCR, puedes obtener `TU_ORG` desde GitHub:
 
 Recomendado (tomar owner del repo actual):
 
@@ -282,9 +351,10 @@ Uso tipico:
 
 ```bash
 export TU_ORG=$(gh repo view --json owner -q .owner.login)
-./k8s/build_images.sh v1 ghcr.io/$TU_ORG
-export GATEWAY_IMAGE=ghcr.io/$TU_ORG/model-gateway:v1
-export MODEL_SERVICE_IMAGE=ghcr.io/$TU_ORG/model-service:v1
+export REGISTRY_SERVER=registry.example.com
+./k8s/build_images.sh v1 $REGISTRY_SERVER/$TU_ORG
+export GATEWAY_IMAGE=$REGISTRY_SERVER/$TU_ORG/model-gateway:v1
+export MODEL_SERVICE_IMAGE=$REGISTRY_SERVER/$TU_ORG/model-service:v1
 ```
 
 ## 12) Script de prueba REST (recomendado)
