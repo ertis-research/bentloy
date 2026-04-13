@@ -66,4 +66,5 @@ curl -X POST "http://localhost:8000/list_models" \\
 ## Documentation
 
 - Kubernetes + MLflow workflow: `docs/mlflow_to_k8s_workflow.md`
+- Kubernetes runbook (no `$env` commands): `docs/runbook.md`
 - Change log and execution notes: `docs/history/cambios_k8s_2026-04-08.md`

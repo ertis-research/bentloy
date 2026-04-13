@@ -12,6 +12,16 @@ GATEWAY_IMAGE="${GATEWAY_IMAGE:-model-gateway:latest}"
 GATEWAY_PORT="${GATEWAY_PORT:-8000}"
 MODEL_SERVICE_PREFIX="${MODEL_SERVICE_PREFIX:-model}"
 MODEL_URL_TEMPLATE="${MODEL_URL_TEMPLATE:-http://{service_name}:3000}"
+MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-}"
+REGISTRY_SERVER="${REGISTRY_SERVER:-}"
+TU_ORG="${TU_ORG:-}"
+MODEL_BASE_IMAGE="${MODEL_BASE_IMAGE:-}"
+MODEL_REGISTRY_SECRET="${MODEL_REGISTRY_SECRET:-model-registry-creds}"
+KANIKO_IMAGE="${KANIKO_IMAGE:-gcr.io/kaniko-project/executor:v1.23.2-debug}"
+KANIKO_SKIP_TLS_VERIFY="${KANIKO_SKIP_TLS_VERIFY:-0}"
+AUTO_DEPLOY_ENABLED="${AUTO_DEPLOY_ENABLED:-1}"
+DEPLOY_BUILD_TIMEOUT_SEC="${DEPLOY_BUILD_TIMEOUT_SEC:-1800}"
+DEPLOY_ROLLOUT_TIMEOUT_SEC="${DEPLOY_ROLLOUT_TIMEOUT_SEC:-300}"
 
 if ! command -v kubectl >/dev/null 2>&1; then
   echo "Error: kubectl is not installed or not in PATH."
@@ -34,8 +44,17 @@ metadata:
   namespace: ${NAMESPACE}
 rules:
   - apiGroups: [""]
-    resources: ["services"]
-    verbs: ["get", "list"]
+    resources: ["services", "pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -82,6 +101,26 @@ spec:
               value: "${NAMESPACE}"
             - name: MODEL_URL_TEMPLATE
               value: "${MODEL_URL_TEMPLATE}"
+            - name: MLFLOW_TRACKING_URI
+              value: "${MLFLOW_TRACKING_URI}"
+            - name: REGISTRY_SERVER
+              value: "${REGISTRY_SERVER}"
+            - name: TU_ORG
+              value: "${TU_ORG}"
+            - name: MODEL_BASE_IMAGE
+              value: "${MODEL_BASE_IMAGE}"
+            - name: MODEL_REGISTRY_SECRET
+              value: "${MODEL_REGISTRY_SECRET}"
+            - name: KANIKO_IMAGE
+              value: "${KANIKO_IMAGE}"
+            - name: KANIKO_SKIP_TLS_VERIFY
+              value: "${KANIKO_SKIP_TLS_VERIFY}"
+            - name: AUTO_DEPLOY_ENABLED
+              value: "${AUTO_DEPLOY_ENABLED}"
+            - name: DEPLOY_BUILD_TIMEOUT_SEC
+              value: "${DEPLOY_BUILD_TIMEOUT_SEC}"
+            - name: DEPLOY_ROLLOUT_TIMEOUT_SEC
+              value: "${DEPLOY_ROLLOUT_TIMEOUT_SEC}"
           readinessProbe:
             httpGet:
               path: /readyz
