@@ -28,4 +28,5 @@ __pycache__/
 Thumbs.db
 
 # Folder for generated documentation
-docs/
+history/
+phases/
