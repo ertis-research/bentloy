@@ -33,7 +33,10 @@ function Import-DotEnv {
             $value = $value.Substring(1, $value.Length - 2)
         }
 
-        Set-Item -Path ("Env:{0}" -f $key) -Value $value
+        $existingValue = [Environment]::GetEnvironmentVariable($key)
+        if ([string]::IsNullOrEmpty($existingValue)) {
+            Set-Item -Path ("Env:{0}" -f $key) -Value $value
+        }
     }
 }
 

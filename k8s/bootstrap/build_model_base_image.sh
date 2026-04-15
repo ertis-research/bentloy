@@ -19,13 +19,40 @@ is_valid_registry_server() {
   [[ "$1" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]]
 }
 
-if [[ -f .env ]]; then
-  # shellcheck disable=SC1091
-  source .env
-  ORG="${1:-${TU_ORG:-$ORG}}"
-  TAG="${2:-${MODEL_BASE_TAG:-$TAG}}"
-  REGISTRY_SERVER="${REGISTRY_SERVER:-$REGISTRY_SERVER}"
-fi
+import_dotenv_without_override() {
+  local dotenv_path="${1:-.env}"
+  [[ -f "$dotenv_path" ]] || return 0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    line="${line#$'\xEF\xBB\xBF'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+    [[ "$line" == *=* ]] || continue
+
+    local key="${line%%=*}"
+    local value="${line#*=}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+
+    if [[ "$value" =~ ^\".*\"$ || "$value" =~ ^\'.*\'$ ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+
+    if [[ -z "${!key-}" ]]; then
+      export "$key=$value"
+    fi
+  done < "$dotenv_path"
+}
+
+import_dotenv_without_override ".env"
+ORG="${1:-${TU_ORG:-$ORG}}"
+TAG="${2:-${MODEL_BASE_TAG:-$TAG}}"
 
 REGISTRY_SERVER="$(normalize_registry_server "$REGISTRY_SERVER")"
 

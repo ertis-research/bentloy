@@ -1,12 +1,44 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NAMESPACE="${1:-${K8S_NAMESPACE:-api-models}}"
+CLI_NAMESPACE="${1:-}"
+NAMESPACE="${CLI_NAMESPACE:-${K8S_NAMESPACE:-api-models}}"
 
-if [[ -f .env ]]; then
-  # shellcheck disable=SC1091
-  source .env
-fi
+import_dotenv_without_override() {
+  local dotenv_path="${1:-.env}"
+  [[ -f "$dotenv_path" ]] || return 0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    line="${line#$'\xEF\xBB\xBF'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+    [[ "$line" == *=* ]] || continue
+
+    local key="${line%%=*}"
+    local value="${line#*=}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+
+    if [[ "$value" =~ ^\".*\"$ || "$value" =~ ^\'.*\'$ ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+
+    if [[ -z "${!key-}" ]]; then
+      export "$key=$value"
+    fi
+  done < "$dotenv_path"
+}
+
+import_dotenv_without_override ".env"
+
+# Resolve namespace after loading .env (arg has priority).
+NAMESPACE="${CLI_NAMESPACE:-${K8S_NAMESPACE:-api-models}}"
 
 GATEWAY_IMAGE="${GATEWAY_IMAGE:-model-gateway:latest}"
 GATEWAY_PORT="${GATEWAY_PORT:-8000}"

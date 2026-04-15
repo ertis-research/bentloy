@@ -58,6 +58,8 @@ $interval = $InitialIntervalSec
 $lastStatus = ""
 $lastStep = ""
 $lastUpdatedAt = ""
+$fullBlock = [string][char]0x2588
+$emptyBlock = [string][char]0x2591
 
 Write-Host ("Watching operation: {0}" -f $OperationId)
 Write-Host ("Endpoint: {0}" -f $uri)
@@ -99,7 +101,7 @@ while ($true) {
     if ($changed) {
         $progressPercent = Get-ProgressPercent -Status $status -Step $step
         $barFilled = [Math]::Floor($progressPercent / 5)
-        $bar = "█" * $barFilled + "░" * (20 - $barFilled)
+        $bar = $fullBlock * $barFilled + $emptyBlock * (20 - $barFilled)
         Write-Host ("[{0}] {1,3}% {2} status={3} step={4}" -f (Get-Date -Format "HH:mm:ss"), $progressPercent, $bar, $status, $step)
 
         if ($response.image_ref) {

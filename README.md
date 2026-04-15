@@ -65,6 +65,8 @@ curl -X POST "http://localhost:8000/list_models" \\
 
 ## Documentation
 
-- Kubernetes + MLflow workflow: `docs/mlflow_to_k8s_workflow.md`
+- Kubernetes + MLflow workflow (archived): `docs/history/mlflow_to_k8s_workflow.md`
 - Kubernetes runbook (no `$env` commands): `docs/runbook.md`
+- Script-only deployment flow: `k8s/build_images.*`, `k8s/deploy_gateway.*`, `k8s/deploy_model.*`
+- Kubernetes YAML manifests are generated/applied by the scripts in `k8s/`.
 - Change log and execution notes: `docs/history/cambios_k8s_2026-04-08.md`

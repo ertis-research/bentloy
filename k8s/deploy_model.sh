@@ -16,6 +16,8 @@ import_dotenv_without_override() {
   [[ -f "$dotenv_path" ]] || return 0
 
   while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    line="${line#$'\xEF\xBB\xBF'}"
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
     [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
@@ -31,6 +33,8 @@ import_dotenv_without_override() {
     if [[ "$value" =~ ^\".*\"$ || "$value" =~ ^\'.*\'$ ]]; then
       value="${value:1:${#value}-2}"
     fi
+
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
 
     if [[ -z "${!key-}" ]]; then
       export "$key=$value"

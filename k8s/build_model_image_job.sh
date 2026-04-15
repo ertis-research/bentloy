@@ -57,6 +57,37 @@ is_valid_image_ref() {
   [[ "$1" =~ ^[a-z0-9./:_-]+$ ]]
 }
 
+import_dotenv_without_override() {
+  local dotenv_path="${1:-.env}"
+  [[ -f "$dotenv_path" ]] || return 0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    line="${line#$'\xEF\xBB\xBF'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+    [[ "$line" == *=* ]] || continue
+
+    local key="${line%%=*}"
+    local value="${line#*=}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+
+    if [[ "$value" =~ ^\".*\"$ || "$value" =~ ^\'.*\'$ ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+
+    if [[ -z "${!key-}" ]]; then
+      export "$key=$value"
+    fi
+  done < "$dotenv_path"
+}
+
 MODEL_NAME=""
 MODEL_VERSION="latest"
 NAMESPACE="${K8S_NAMESPACE:-api-models}"
@@ -66,11 +97,8 @@ TARGET_IMAGE="${TARGET_IMAGE:-}"
 WAIT_FOR_COMPLETION="0"
 INSECURE_REGISTRY_TLS="${KANIKO_SKIP_TLS_VERIFY:-0}"
 
-if [[ -f .env ]]; then
-  # shellcheck disable=SC1091
-  source .env
-  NAMESPACE="${K8S_NAMESPACE:-$NAMESPACE}"
-fi
+import_dotenv_without_override ".env"
+NAMESPACE="${K8S_NAMESPACE:-$NAMESPACE}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

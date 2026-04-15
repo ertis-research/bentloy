@@ -16,20 +16,21 @@ MODEL_URL_TEMPLATE=http://{service_name}:3000
 GATEWAY_PORT=8000
 
 REGISTRY_SERVER=registry.example.com
-TU_ORG=api-models
+TU_ORG=my-project
 REGISTRY_USERNAME=YOUR_REGISTRY_USER
 REGISTRY_PASSWORD=YOUR_REGISTRY_TOKEN_OR_PASSWORD
 MODEL_REGISTRY_SECRET=model-registry-creds
 
-MODEL_BASE_IMAGE=registry.example.com/api-models/model-service-base:py310
+MODEL_BASE_IMAGE=registry.example.com/my-project/model-service-base:py310
 KANIKO_SKIP_TLS_VERIFY=1
 
 AUTO_DEPLOY_ENABLED=1
 DEPLOY_BUILD_TIMEOUT_SEC=1800
 DEPLOY_ROLLOUT_TIMEOUT_SEC=300
 
-GATEWAY_IMAGE=registry.example.com/api-models/model-gateway:20260413-01
-MODEL_SERVICE_IMAGE=registry.example.com/api-models/model-service:20260413-01
+GATEWAY_IMAGE=registry.example.com/my-project/model-gateway:20260413-01
+MODEL_SERVICE_IMAGE=registry.example.com/my-project/model-service:20260413-01
+BOOTSTRAP_TAG=20260413-01
 ```
 
 Notes:
@@ -51,7 +52,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 2. Login to the registry:
 
 ```powershell
-docker login registry.example.com
+docker login <REGISTRY_SERVER>
 ```
 
 3. Create/update registry secret in Kubernetes:
@@ -63,13 +64,13 @@ docker login registry.example.com
 4. Build and push base runtime image:
 
 ```powershell
-.\k8s\bootstrap\build_model_base_image.ps1 -Org api-models -Tag py310
+.\k8s\bootstrap\build_model_base_image.ps1 -Org <TU_ORG> -Tag py310
 ```
 
 5. Build and push gateway + model-service images with a unique tag:
 
 ```powershell
-.\k8s\build_images.ps1 -Tag 20260413-01 -RegistryPrefix registry.example.com/api-models
+.\k8s\build_images.ps1 -Tag 20260413-01 -RegistryPrefix <REGISTRY_SERVER>/<TU_ORG>
 ```
 
 6. Deploy gateway:
@@ -102,7 +103,7 @@ kubectl -n api-models port-forward svc/gateway 8000:8000
 2. Copy `Target image:` value from previous command output, then deploy:
 
 ```powershell
-.\k8s\deploy_model_image.ps1 -ModelName tiny_demo_model -ModelImage registry.example.com/api-models/model-tiny-demo-model:vlatest-t20260413143000 -Namespace api-models -Replicas 1
+.\k8s\deploy_model_image.ps1 -ModelName tiny_demo_model -ModelImage <REGISTRY_SERVER>/<TU_ORG>/model-tiny-demo-model:vlatest-t20260413143000 -Namespace api-models -Replicas 1
 ```
 
 3. Validate model rollout:
@@ -152,7 +153,9 @@ Invoke-RestMethod -Method Post -Uri "http://localhost:8000/deploy_status" -Conte
 The watcher uses a progress bar format:
 
 ```python
-bar = "█" * bar_filled + "░" * (20 - bar_filled)
+full = chr(0x2588)
+empty = chr(0x2591)
+bar = full * bar_filled + empty * (20 - bar_filled)
 ```
 
 and increasing polling interval (backoff) to reduce request frequency.
@@ -270,3 +273,62 @@ $batchBody = @{
 
 Invoke-RestMethod -Method Post -Uri "http://localhost:8000/batch_predict" -ContentType "application/json" -Body $batchBody
 ```
+
+## 8) YAML manifest profile (script-driven)
+
+This repository applies Kubernetes manifests in YAML format through the scripts in `k8s/` (`kubectl apply -f -`).
+
+### 8.1 Publish shared images
+
+PowerShell:
+
+```powershell
+.\k8s\build_images.ps1 -Tag 20260414-01 -RegistryPrefix <REGISTRY_SERVER>/<TU_ORG>
+```
+
+Bash:
+
+```bash
+./k8s/build_images.sh 20260414-01 <REGISTRY_SERVER>/<TU_ORG>
+```
+
+### 8.2 Deploy gateway
+
+PowerShell:
+
+```powershell
+.\k8s\deploy_gateway.ps1 -Namespace api-models
+kubectl -n api-models rollout status deploy/gateway --timeout=180s
+```
+
+Bash:
+
+```bash
+./k8s/deploy_gateway.sh api-models
+kubectl -n api-models rollout status deploy/gateway --timeout=180s
+```
+
+### 8.3 TLS note for Kaniko
+
+Current project decision:
+
+1. Keep `KANIKO_SKIP_TLS_VERIFY=1` while registry trust chain is not available in build pods.
+2. Use the same TLS behavior in local Docker Desktop Kubernetes and real cluster for parity.
+
+Set it to `0` when the registry certificate chain is trusted.
+
+### 8.4 Environment parity note (Docker Desktop vs real cluster)
+
+Expected impact for the test models used so far (for example `tiny_demo_model`):
+
+1. Runtime serving difference should be minimal in normal conditions.
+2. The largest variance is usually in build/push/pull time (registry/network), not in `/predict` execution.
+3. Differences become more visible with larger models, heavier dependencies, or parallel deployments.
+
+Why this expectation is reasonable with the current codebase:
+
+1. Gateway API behavior is identical across environments.
+2. Model services are deployed by the same manifests generated from `k8s/deploy_model.ps1` and `k8s/deploy_model.sh`.
+3. Tiny demo models are small and inference cost is low compared with image build and artifact download steps.
+
+
