@@ -1,8 +1,12 @@
 # Runbook: Kubernetes Launch Without `$env` Commands
 
-Validated on 2026-04-13: gateway deployment and endpoint-based model deployment are working from `localhost`.
+Validated on 2026-04-13: gateway deployment and endpoint-based model deployment are working through `LoadBalancer`.
 
 This runbook explains how to launch the project end-to-end using `.env` plus explicit script parameters, without setting `$env:*` variables in PowerShell commands.
+
+Technical architecture reference:
+
+- `docs/gateway_technical.md`
 
 ## 1) `.env` configuration
 
@@ -86,10 +90,13 @@ kubectl -n api-models rollout status deploy/gateway --timeout=180s
 kubectl -n api-models get deploy,svc,pods
 ```
 
-8. Open local access to gateway:
+8. Resolve gateway external endpoint (LoadBalancer):
 
 ```powershell
-kubectl -n api-models port-forward svc/gateway 8000:8000
+$gatewayIp = kubectl -n api-models get svc gateway -o jsonpath="{.status.loadBalancer.ingress[0].ip}"
+if (-not $gatewayIp) { $gatewayIp = kubectl -n api-models get svc gateway -o jsonpath="{.status.loadBalancer.ingress[0].hostname}" }
+$gatewayUrl = "http://$gatewayIp:8000"
+$gatewayUrl
 ```
 
 ## 3) Deploy one model (one image per model)
@@ -113,13 +120,7 @@ kubectl -n api-models rollout status deploy/model-tiny-demo-model --timeout=300s
 kubectl -n api-models get deploy,svc,pods
 ```
 
-## 4) Endpoint-based deployment from `localhost`
-
-With `port-forward` active:
-
-```powershell
-kubectl -n api-models port-forward svc/gateway 8000:8000
-```
+## 4) Endpoint-based deployment via LoadBalancer
 
 1. Start asynchronous deployment:
 
@@ -133,7 +134,7 @@ $body = @{
   insecure_registry_tls = $false
 } | ConvertTo-Json
 
-$result = Invoke-RestMethod -Method Post -Uri "http://localhost:8000/deploy_model" -ContentType "application/json" -Body $body
+$result = Invoke-RestMethod -Method Post -Uri "$gatewayUrl/deploy_model" -ContentType "application/json" -Body $body
 $result
 ```
 
@@ -141,13 +142,13 @@ $result
 
 ```powershell
 $statusBody = @{ operation_id = $result.operation_id } | ConvertTo-Json
-Invoke-RestMethod -Method Post -Uri "http://localhost:8000/deploy_status" -ContentType "application/json" -Body $statusBody
+Invoke-RestMethod -Method Post -Uri "$gatewayUrl/deploy_status" -ContentType "application/json" -Body $statusBody
 ```
 
 3. Automatic status watcher with progress bar:
 
 ```powershell
-.\scripts\watch_deploy_status.ps1 -OperationId $result.operation_id -GatewayUrl "http://localhost:8000"
+.\scripts\watch_deploy_status.ps1 -OperationId $result.operation_id -GatewayUrl $gatewayUrl
 ```
 
 The watcher uses a progress bar format:
@@ -162,18 +163,16 @@ and increasing polling interval (backoff) to reduce request frequency.
 
 ## 5) REST API validation
 
-With `port-forward` active:
-
 1. List models:
 
 ```powershell
-curl -X POST "http://localhost:8000/list_models" -H "Content-Type: application/json" -d "{}"
+curl -X POST "$gatewayUrl/list_models" -H "Content-Type: application/json" -d "{}"
 ```
 
 2. Predict:
 
 ```powershell
-curl -X POST "http://localhost:8000/predict" -H "Content-Type: application/json" -d "{\"model_name\":\"tiny_demo_model\",\"data\":{\"features\":[1.0,2.0,3.0]}}"
+curl -X POST "$gatewayUrl/predict" -H "Content-Type: application/json" -d "{\"model_name\":\"tiny_demo_model\",\"data\":{\"features\":[1.0,2.0,3.0]}}"
 ```
 
 ## 6) Deploy a second model
@@ -208,13 +207,13 @@ $deployBody = @{
   insecure_registry_tls = $false
 } | ConvertTo-Json
 
-$deployResult = Invoke-RestMethod -Method Post -Uri "http://localhost:8000/deploy_model" -ContentType "application/json" -Body $deployBody
+$deployResult = Invoke-RestMethod -Method Post -Uri "$gatewayUrl/deploy_model" -ContentType "application/json" -Body $deployBody
 ```
 
 2. Watch until `ready`:
 
 ```powershell
-.\scripts\watch_deploy_status.ps1 -OperationId $deployResult.operation_id -GatewayUrl "http://localhost:8000"
+.\scripts\watch_deploy_status.ps1 -OperationId $deployResult.operation_id -GatewayUrl $gatewayUrl
 ```
 
 3. Test prediction:
@@ -225,13 +224,13 @@ $predictBody = @{
   data = @{ features = @(1.0, 2.0, 3.0) }
 } | ConvertTo-Json -Depth 5
 
-Invoke-RestMethod -Method Post -Uri "http://localhost:8000/predict" -ContentType "application/json" -Body $predictBody
+Invoke-RestMethod -Method Post -Uri "$gatewayUrl/predict" -ContentType "application/json" -Body $predictBody
 ```
 
 ### Example B: check discoverability and endpoints
 
 ```powershell
-Invoke-RestMethod -Method Post -Uri "http://localhost:8000/list_models" -ContentType "application/json" -Body "{}"
+Invoke-RestMethod -Method Post -Uri "$gatewayUrl/list_models" -ContentType "application/json" -Body "{}"
 ```
 
 Confirm:
@@ -251,7 +250,7 @@ $externalPredictBody = @{
   data = @{ features = @(1.0, 2.0, 3.0) }
 } | ConvertTo-Json -Depth 6
 
-Invoke-RestMethod -Method Post -Uri "http://localhost:8000/predict" -ContentType "application/json" -Body $externalPredictBody
+Invoke-RestMethod -Method Post -Uri "$gatewayUrl/predict" -ContentType "application/json" -Body $externalPredictBody
 ```
 
 Batch with mixed local + external routing:
@@ -271,7 +270,7 @@ $batchBody = @{
   )
 } | ConvertTo-Json -Depth 8
 
-Invoke-RestMethod -Method Post -Uri "http://localhost:8000/batch_predict" -ContentType "application/json" -Body $batchBody
+Invoke-RestMethod -Method Post -Uri "$gatewayUrl/batch_predict" -ContentType "application/json" -Body $batchBody
 ```
 
 ## 8) YAML manifest profile (script-driven)

@@ -1,0 +1,65 @@
+from typing import Any, Callable
+
+import httpx
+
+from ..domain.helpers import slug_to_model_name
+
+
+class KubernetesModelDiscovery:
+    def __init__(
+        self,
+        model_service_prefix: str,
+        model_namespace: str,
+        model_url_template: str,
+        client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
+    ) -> None:
+        self.model_service_prefix = model_service_prefix
+        self.model_namespace = model_namespace
+        self.model_url_template = model_url_template
+        self.client_factory = client_factory
+
+    async def discover_services(
+        self,
+        base_url: str,
+        headers: dict[str, str],
+        verify: str | bool,
+    ) -> tuple[list[dict[str, str]], str | None]:
+        url = f"{base_url}/api/v1/namespaces/{self.model_namespace}/services"
+
+        try:
+            async with self.client_factory(timeout=5.0, verify=verify) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                items = response.json().get("items", [])
+        except Exception as exc:
+            return [], f"Could not discover Kubernetes services: {exc}"
+
+        prefix = f"{self.model_service_prefix}-"
+        discovered: list[dict[str, str]] = []
+
+        for item in items:
+            service_name = item.get("metadata", {}).get("name", "")
+            if not service_name.startswith(prefix):
+                continue
+
+            model_slug = service_name[len(prefix) :]
+            inferred_model_name = slug_to_model_name(model_slug)
+            model_name = inferred_model_name
+            base = self.model_url_template.format(
+                service_name=service_name,
+                model_name=model_name,
+                model_slug=model_slug,
+                namespace=self.model_namespace,
+            )
+            discovered.append(
+                {
+                    "service_name": service_name,
+                    "model_slug": model_slug,
+                    "inferred_model_name": inferred_model_name,
+                    "base_url": base,
+                    "predict_endpoint": f"{base}/predict",
+                }
+            )
+
+        discovered.sort(key=lambda service: service["service_name"])
+        return discovered, None

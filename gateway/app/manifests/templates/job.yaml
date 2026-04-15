@@ -1,0 +1,87 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: placeholder-job-name
+  namespace: default
+  labels:
+    app: model-image-build
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: model-image-build
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: model-registry-creds
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: registry-creds
+          secret:
+            secretName: model-registry-creds
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+      initContainers:
+        - name: prepare-build-context
+          image: python:3.10-slim
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          env:
+            - name: MLFLOW_TRACKING_URI
+              value: ""
+            - name: MODEL_NAME
+              value: ""
+            - name: MODEL_VERSION
+              value: ""
+            - name: MODEL_URI
+              value: ""
+          command: ["/bin/sh", "-c"]
+          args:
+            - "echo prepare-build-context placeholder"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+      containers:
+        - name: kaniko
+          image: gcr.io/kaniko-project/executor:v1.23.2-debug
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          args:
+            - --dockerfile=/workspace/context/Dockerfile
+            - --context=dir:///workspace/context
+            - --destination=example.registry.local/project/model:placeholder
+            - --build-arg=BASE_IMAGE=example.registry.local/project/model-base:py310
+            - --snapshot-mode=redo
+            - --use-new-run
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: registry-creds
+              mountPath: /kaniko/.docker
+              readOnly: true

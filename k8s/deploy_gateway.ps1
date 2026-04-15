@@ -210,5 +210,30 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ("Gateway deployed in namespace {0}." -f $Namespace)
-Write-Host "If LoadBalancer is pending, use port-forward:"
-Write-Host ("kubectl -n {0} port-forward svc/gateway 8000:{1}" -f $Namespace, $gatewayPort)
+Write-Host "Waiting for LoadBalancer endpoint (up to 180s)..."
+
+$deadline = (Get-Date).AddSeconds(180)
+$lbEndpoint = ""
+while ((Get-Date) -lt $deadline) {
+    $lbIp = (& kubectl -n $Namespace get svc gateway -o jsonpath="{.status.loadBalancer.ingress[0].ip}" 2>$null).Trim()
+    $lbHost = (& kubectl -n $Namespace get svc gateway -o jsonpath="{.status.loadBalancer.ingress[0].hostname}" 2>$null).Trim()
+
+    if (-not [string]::IsNullOrWhiteSpace($lbIp)) {
+        $lbEndpoint = $lbIp
+        break
+    }
+    if (-not [string]::IsNullOrWhiteSpace($lbHost)) {
+        $lbEndpoint = $lbHost
+        break
+    }
+
+    Start-Sleep -Seconds 5
+}
+
+if (-not [string]::IsNullOrWhiteSpace($lbEndpoint)) {
+    Write-Host ("Gateway URL: http://{0}:{1}" -f $lbEndpoint, $gatewayPort)
+}
+else {
+    Write-Warning "LoadBalancer endpoint is still pending. Check your LB controller (cloud provider / MetalLB)."
+    Write-Host ("Check status with: kubectl -n {0} get svc gateway -o wide" -f $Namespace)
+}

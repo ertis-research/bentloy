@@ -26,4 +26,5 @@ kubectl apply -f k8s/yaml/gateway.yaml
 ```bash
 kubectl -n api-models rollout status deploy/gateway --timeout=180s
 kubectl -n api-models get deploy,svc,pods
+kubectl -n api-models get svc gateway -o wide
 ```

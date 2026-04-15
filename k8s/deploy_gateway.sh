@@ -184,5 +184,30 @@ spec:
 EOF
 
 echo "Gateway deployed in namespace ${NAMESPACE}."
-echo "If LoadBalancer is pending, use port-forward:"
-echo "kubectl -n ${NAMESPACE} port-forward svc/gateway 8000:${GATEWAY_PORT}"
+echo "Waiting for LoadBalancer endpoint (up to 180s)..."
+
+deadline=$((SECONDS + 180))
+lb_endpoint=""
+
+while (( SECONDS < deadline )); do
+  lb_ip="$(kubectl -n "${NAMESPACE}" get svc gateway -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+  lb_host="$(kubectl -n "${NAMESPACE}" get svc gateway -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+
+  if [[ -n "${lb_ip}" ]]; then
+    lb_endpoint="${lb_ip}"
+    break
+  fi
+  if [[ -n "${lb_host}" ]]; then
+    lb_endpoint="${lb_host}"
+    break
+  fi
+
+  sleep 5
+done
+
+if [[ -n "${lb_endpoint}" ]]; then
+  echo "Gateway URL: http://${lb_endpoint}:${GATEWAY_PORT}"
+else
+  echo "LoadBalancer endpoint is still pending. Check your LB controller (cloud provider / MetalLB)."
+  echo "Check status with: kubectl -n ${NAMESPACE} get svc gateway -o wide"
+fi

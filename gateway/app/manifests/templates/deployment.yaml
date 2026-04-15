@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-service-placeholder
+  namespace: default
+  labels:
+    app: model-service
+    model-slug: placeholder
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: model-service
+      model-slug: placeholder
+  template:
+    metadata:
+      labels:
+        app: model-service
+        model-slug: placeholder
+    spec:
+      containers:
+        - name: model-service
+          image: model-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          env:
+            - name: MLFLOW_TRACKING_URI
+              value: ""
+            - name: MODEL_NAME
+              value: ""
+            - name: MODEL_VERSION
+              value: ""
+            - name: MODEL_URI
+              value: ""
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 15

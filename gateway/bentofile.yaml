@@ -2,6 +2,10 @@ service: "service:GatewayService"
 description: "BentoML gateway that routes predictions to deployed models"
 include:
   - "service.py"
+  - "app/**/*.py"
+  - "app/**/*.yaml"
+  - "app/**/*.yml"
+  - "app/**/*.sh"
 python:
   requirements_txt: "requirements.txt"
 docker:
