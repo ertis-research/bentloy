@@ -1,9 +1,0 @@
-service: "service:MLflowModelService"
-description: "Generic BentoML service for MLflow models"
-include:
-  - "service.py"
-python:
-  requirements_txt: "requirements.txt"
-docker:
-  distro: debian
-  python_version: "3.10"

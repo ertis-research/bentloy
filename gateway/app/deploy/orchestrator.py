@@ -50,7 +50,7 @@ class DeployOrchestrator:
             payload: DeployOperationRequest = operation["request"]
             namespace = payload["namespace"]
             model_name = payload["model_name"]
-            model_slug = payload["model_slug"]
+            deployment_slug = payload["deployment_slug"]
             model_version = payload["model_version"]
             model_uri = payload["model_uri"]
             tracking_uri = payload["tracking_uri"]
@@ -160,18 +160,23 @@ class DeployOrchestrator:
                 deployment_manifest = self.build_deployment_manifest(
                     namespace=namespace,
                     model_name=model_name,
-                    model_slug=model_slug,
+                    model_slug=deployment_slug,
                     model_image=target_image,
                     replicas=replicas,
                     tracking_uri=tracking_uri,
                     model_uri="/models/model",
                     model_version="image",
                     registry_secret=registry_secret,
+                    model_service_prefix=self.model_service_prefix,
                 )
-                service_manifest = self.build_service_manifest(namespace, model_slug)
+                service_manifest = self.build_service_manifest(
+                    namespace,
+                    deployment_slug,
+                    self.model_service_prefix,
+                )
 
-                deploy_name = f"{self.model_service_prefix}-{model_slug}"
-                service_name = f"{self.model_service_prefix}-{model_slug}"
+                deploy_name = f"{self.model_service_prefix}-{deployment_slug}"
+                service_name = f"{self.model_service_prefix}-{deployment_slug}"
                 deployments_url = f"{base_url}/apis/apps/v1/namespaces/{namespace}/deployments"
                 deployment_url = f"{deployments_url}/{deploy_name}"
                 services_url = f"{base_url}/api/v1/namespaces/{namespace}/services"

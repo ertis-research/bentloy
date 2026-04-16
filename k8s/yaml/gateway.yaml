@@ -91,7 +91,7 @@ spec:
           # IMPORTANTE (paso 5): pon aqui la imagen exacta que acabas de publicar.
           # Ejemplo con tag fijo:
           #   registry.example.com/api-models/model-gateway:20260415-1015
-          image: registry.example.com/api-models/model-gateway:20260413-01
+          image: registry.example.com/api-models/model-gateway:20260416-01
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3000

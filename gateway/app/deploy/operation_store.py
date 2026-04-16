@@ -45,6 +45,7 @@ class DeployOperationStore:
                     "operation_id": operation["operation_id"],
                     "status": operation["status"],
                     "model_name": operation["model_name"],
+                    "deployed_name": operation["deployed_name"],
                     "image_ref": operation["image_ref"],
                     "updated_at": operation["updated_at"],
                 }

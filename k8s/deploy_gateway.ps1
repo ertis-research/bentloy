@@ -40,6 +40,11 @@ function Import-DotEnv {
     }
 }
 
+function Test-ValidK8sName {
+    param([string]$Value)
+    return [Regex]::IsMatch($Value, "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+}
+
 Import-DotEnv
 
 if ([string]::IsNullOrWhiteSpace($Namespace)) {
@@ -63,6 +68,22 @@ $deployRolloutTimeoutSec = if ($env:DEPLOY_ROLLOUT_TIMEOUT_SEC) { $env:DEPLOY_RO
 
 if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
     throw "Error: kubectl is not installed or not in PATH."
+}
+
+$imagePullSecretsBlock = ""
+$useImagePullSecret = (
+    -not [string]::IsNullOrWhiteSpace($modelRegistrySecret) -and
+    [Regex]::IsMatch($gatewayImage, "^[a-z0-9.-]+(:[0-9]+)?/")
+)
+if ($useImagePullSecret) {
+    if (-not (Test-ValidK8sName -Value $modelRegistrySecret)) {
+        throw "Invalid MODEL_REGISTRY_SECRET '$modelRegistrySecret'."
+    }
+
+    $imagePullSecretsBlock = @"
+      imagePullSecrets:
+        - name: $modelRegistrySecret
+"@
 }
 
 $namespaceExists = $true
@@ -141,6 +162,7 @@ spec:
         app: gateway
     spec:
       serviceAccountName: gateway-sa
+$imagePullSecretsBlock
       containers:
         - name: gateway
           image: $gatewayImage

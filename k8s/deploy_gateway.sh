@@ -55,9 +55,27 @@ AUTO_DEPLOY_ENABLED="${AUTO_DEPLOY_ENABLED:-1}"
 DEPLOY_BUILD_TIMEOUT_SEC="${DEPLOY_BUILD_TIMEOUT_SEC:-1800}"
 DEPLOY_ROLLOUT_TIMEOUT_SEC="${DEPLOY_ROLLOUT_TIMEOUT_SEC:-300}"
 
+is_valid_k8s_name() {
+  [[ "$1" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]
+}
+
 if ! command -v kubectl >/dev/null 2>&1; then
   echo "Error: kubectl is not installed or not in PATH."
   exit 1
+fi
+
+IMAGE_PULL_SECRETS_BLOCK=""
+if [[ -n "$MODEL_REGISTRY_SECRET" && "$GATEWAY_IMAGE" =~ ^[a-z0-9.-]+(:[0-9]+)?/ ]]; then
+  is_valid_k8s_name "$MODEL_REGISTRY_SECRET" || {
+    echo "Error: invalid MODEL_REGISTRY_SECRET '$MODEL_REGISTRY_SECRET'."
+    exit 1
+  }
+
+  IMAGE_PULL_SECRETS_BLOCK=$(cat <<EOF
+      imagePullSecrets:
+        - name: ${MODEL_REGISTRY_SECRET}
+EOF
+)
 fi
 
 kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 || kubectl create namespace "$NAMESPACE"
@@ -120,6 +138,7 @@ spec:
         app: gateway
     spec:
       serviceAccountName: gateway-sa
+${IMAGE_PULL_SECRETS_BLOCK}
       containers:
         - name: gateway
           image: ${GATEWAY_IMAGE}

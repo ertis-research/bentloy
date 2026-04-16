@@ -6,6 +6,7 @@ COPY requirements.base.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY service.py /app/service.py
+COPY app /app/app
 
 EXPOSE 3000
 

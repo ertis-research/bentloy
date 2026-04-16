@@ -81,12 +81,19 @@ class DeployHandler:
         model_uri: str = "",
         target_image: str = "",
         insecure_registry_tls: bool = False,
+        deployed_name: str = "",
+        append_date: bool = False,
     ) -> dict[str, Any]:
         if not self.auto_deploy_enabled:
             return {"error": "Automatic deploy is disabled on this gateway."}
 
         namespace = namespace.strip() or self.model_namespace
         model_slug = to_model_slug(model_name)
+        deployed_name = (deployed_name or "").strip() or model_name
+        append_date = bool(append_date)
+        if append_date:
+            deployed_name = f"{deployed_name}_{datetime.now(timezone.utc).strftime('%Y%m%d')}"
+        deployment_slug = to_model_slug(deployed_name)
         model_version = (model_version or "latest").strip()
         run_id = run_id.strip()
         tracking_uri = tracking_uri.strip() or self.default_tracking_uri
@@ -98,6 +105,8 @@ class DeployHandler:
 
         if not model_slug:
             return {"error": "Invalid model_name. Could not generate slug."}
+        if not deployment_slug:
+            return {"error": "Invalid deployed_name. Could not generate slug."}
         if not is_valid_k8s_name(namespace):
             return {"error": f"Invalid namespace '{namespace}'."}
         if replicas < 1:
@@ -138,13 +147,15 @@ class DeployHandler:
             return {"error": f"Invalid base image '{base_image}'."}
 
         operation_id = self._build_operation_id()
-        job_name = f"build-model-{model_slug}-{operation_id[-6:]}"
+        job_name = f"build-model-{deployment_slug}-{operation_id[-6:]}"
         job_name = re.sub(r"[^a-z0-9-]+", "-", job_name.lower()).strip("-")[:63].rstrip("-")
 
         request: DeployOperationRequest = {
             "namespace": namespace,
             "model_name": model_name,
             "model_slug": model_slug,
+            "deployed_name": deployed_name,
+            "deployment_slug": deployment_slug,
             "model_version": model_version,
             "model_uri": model_uri,
             "tracking_uri": tracking_uri,
@@ -164,6 +175,7 @@ class DeployHandler:
             "created_at": self.now_iso(),
             "updated_at": self.now_iso(),
             "model_name": model_name,
+            "deployed_name": deployed_name,
             "model_version": model_version,
             "namespace": namespace,
             "replicas": replicas,
@@ -181,6 +193,7 @@ class DeployHandler:
             "operation_id": operation_id,
             "status": "queued",
             "model_name": model_name,
+            "deployed_name": deployed_name,
             "namespace": namespace,
             "image_ref": target_image,
             "k8s_job": job_name,
@@ -196,6 +209,7 @@ class DeployHandler:
             "status": operation["status"],
             "step": operation["step"],
             "model_name": operation["model_name"],
+            "deployed_name": operation["deployed_name"],
             "model_version": operation["model_version"],
             "namespace": operation["namespace"],
             "image_ref": operation["image_ref"],

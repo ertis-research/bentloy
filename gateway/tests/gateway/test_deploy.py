@@ -15,6 +15,8 @@ def _build_request(job_name: str = "build-model-tiny-demo-abc123") -> DeployOper
         "namespace": "api-models",
         "model_name": "tiny_demo_model",
         "model_slug": "tiny-demo-model",
+        "deployed_name": "tiny_demo_model",
+        "deployment_slug": "tiny-demo-model",
         "model_version": "latest",
         "model_uri": "",
         "tracking_uri": "http://mlflow:5000",
@@ -40,6 +42,7 @@ def _build_operation(
         "created_at": "2026-04-15T10:00:00+00:00",
         "updated_at": updated_at,
         "model_name": request["model_name"],
+        "deployed_name": request["deployed_name"],
         "model_version": request["model_version"],
         "namespace": request["namespace"],
         "replicas": request["replicas"],
@@ -165,7 +168,7 @@ class DeployOrchestratorTest(unittest.IsolatedAsyncioTestCase):
             build_deployment_manifest=lambda **kwargs: {
                 "metadata": {"name": f"model-{kwargs['model_slug']}"}
             },
-            build_service_manifest=lambda namespace, model_slug: {
+            build_service_manifest=lambda namespace, model_slug, model_service_prefix: {
                 "metadata": {"name": f"model-{model_slug}"}
             },
             kaniko_image="gcr.io/kaniko-project/executor:v1.23.2-debug",
@@ -218,7 +221,7 @@ class DeployOrchestratorTest(unittest.IsolatedAsyncioTestCase):
             build_deployment_manifest=lambda **kwargs: {
                 "metadata": {"name": f"model-{kwargs['model_slug']}"}
             },
-            build_service_manifest=lambda namespace, model_slug: {
+            build_service_manifest=lambda namespace, model_slug, model_service_prefix: {
                 "metadata": {"name": f"model-{model_slug}"}
             },
             kaniko_image="gcr.io/kaniko-project/executor:v1.23.2-debug",
@@ -257,17 +260,41 @@ class GatewayDeployApiTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("operation_id", response)
         self.assertIn("k8s_job", response)
+        self.assertEqual(response["deployed_name"], "tiny_demo_model")
 
         operation_id = response["operation_id"]
         await asyncio.sleep(0)
         status = await service.deploy_status(operation_id)
         self.assertEqual(status["operation_id"], operation_id)
         self.assertEqual(status["status"], "queued")
+        self.assertEqual(status["deployed_name"], "tiny_demo_model")
 
         await service.operation_store.update(operation_id, status="building", step="create_job")
         updated_status = await service.deploy_status(operation_id)
         self.assertEqual(updated_status["status"], "building")
         self.assertEqual(updated_status["step"], "create_job")
+
+    async def test_deploy_model_accepts_custom_deployed_name(self) -> None:
+        service = GatewayService()
+        service.model_base_image = "registry.example.com/api-models/model-service-base:py310"
+        service.deploy_handler.model_base_image = service.model_base_image
+        service.deploy_orchestrator.run_operation = AsyncMock(return_value=None)
+
+        response = await service.deploy_model(
+            model_name="tiny_demo_model",
+            model_version="latest",
+            tracking_uri="http://mlflow:5000",
+            target_image="registry.example.com/api-models/model-tiny-demo:latest",
+            deployed_name="tiny_alias",
+            append_date=True,
+        )
+
+        self.assertRegex(response["deployed_name"], r"^tiny_alias_[0-9]{8}$")
+        self.assertRegex(response["k8s_job"], r"^build-model-tiny-alias-[0-9]{8}-[a-z0-9]{6}$")
+
+        operation_id = response["operation_id"]
+        status = await service.deploy_status(operation_id)
+        self.assertRegex(status["deployed_name"], r"^tiny_alias_[0-9]{8}$")
 
 
 if __name__ == "__main__":

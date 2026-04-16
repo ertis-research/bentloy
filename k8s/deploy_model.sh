@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: ./k8s/deploy_model.sh <MODEL_NAME> [MODEL_VERSION] [NAMESPACE] [REPLICAS]"
+  echo "Usage: ./k8s/deploy_model.sh <MODEL_NAME> [MODEL_VERSION] [NAMESPACE] [REPLICAS] [DEPLOYED_NAME] [APPEND_DATE]"
   exit 1
 fi
 
@@ -10,6 +10,8 @@ MODEL_NAME="$1"
 MODEL_VERSION="${2:-latest}"
 NAMESPACE="${3:-${K8S_NAMESPACE:-api-models}}"
 REPLICAS="${4:-1}"
+DEPLOYED_NAME="${5:-}"
+APPEND_DATE="${6:-false}"
 
 import_dotenv_without_override() {
   local dotenv_path="${1:-.env}"
@@ -64,6 +66,12 @@ is_valid_image_ref() {
   [[ "$1" =~ ^[a-z0-9./:_-]+$ ]]
 }
 
+is_true() {
+  local value="${1:-}"
+  value="$(echo "$value" | tr '[:upper:]' '[:lower:]')"
+  [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" ]]
+}
+
 if [[ -z "$MLFLOW_TRACKING_URI" && -z "$MODEL_URI" ]]; then
   echo "Error: set MLFLOW_TRACKING_URI or MODEL_URI (in .env or environment)."
   exit 1
@@ -81,7 +89,13 @@ to_slug() {
     | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//; s/-+/-/g'
 }
 
-MODEL_SLUG="$(to_slug "$MODEL_NAME")"
+DEPLOYED_NAME_EFFECTIVE="${DEPLOYED_NAME:-$MODEL_NAME}"
+if is_true "$APPEND_DATE"; then
+  DATE_SUFFIX="$(date -u +%Y%m%d)"
+  DEPLOYED_NAME_EFFECTIVE="${DEPLOYED_NAME_EFFECTIVE}_${DATE_SUFFIX}"
+fi
+
+MODEL_SLUG="$(to_slug "$DEPLOYED_NAME_EFFECTIVE")"
 DEPLOY_NAME="${MODEL_SERVICE_PREFIX}-${MODEL_SLUG}"
 SERVICE_NAME="${MODEL_SERVICE_PREFIX}-${MODEL_SLUG}"
 
@@ -199,6 +213,7 @@ spec:
 EOF
 
 echo "Model deployed: ${MODEL_NAME} (${MODEL_VERSION})"
+echo "Deployed alias: ${DEPLOYED_NAME_EFFECTIVE}"
 echo "Namespace: ${NAMESPACE}"
 echo "Internal service URL: http://${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:3000"
-echo "Call through gateway with model_name=${MODEL_NAME}"
+echo "Call through gateway with model_name=${DEPLOYED_NAME_EFFECTIVE}"

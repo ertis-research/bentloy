@@ -1,72 +1,141 @@
-# NITRATE_model
+# NITRATE Model Serving
 
-REST API for serving MLflow models on Kubernetes using BentoML.
+Production-oriented API gateway and model-serving stack on Kubernetes, using MLflow + BentoML.
 
-This repository is now focused on model serving infrastructure (gateway + per-model services), not on nitrate model research/training.
+## Overview
 
-## Project structure
+This project serves MLflow models through:
 
-- `gateway/`: API gateway service that routes `/predict` requests by `model_name`.
-- `model_service/`: Generic BentoML service that loads one MLflow model.
-- `k8s/`: Deployment and image build scripts (`.sh` and `.ps1`).
-- `scripts/`: Utilities for model registry and REST API validation.
-- `examples/rest/`: Request payload samples.
-- `docs/`: Workflow and operational notes.
-- `legacy/nitrate_research/`: Archived research/training assets from the old nitrate-focused workflow.
+1. A `gateway` API that receives `/predict` and deployment requests.
+2. One model service per model (`model-<slug>`), deployed as independent Kubernetes workloads.
+3. An asynchronous image-build pipeline (Kaniko Job) for image-per-model deployments.
 
-## Quick start
+## Architecture
 
-1. Create local config from `.env_example` and set at least:
-   - `MLFLOW_TRACKING_URI`
-   - `K8S_NAMESPACE` (default: `api-models`)
-2. Build images:
-   - Bash: `./k8s/build_images.sh latest`
-   - PowerShell: `.\\k8s\\build_images.ps1 -Tag latest`
-3. Deploy gateway (once per namespace):
-   - Bash: `./k8s/deploy_gateway.sh api-models`
-   - PowerShell: `.\\k8s\\deploy_gateway.ps1 -Namespace api-models`
-4. Deploy one model:
-   - Bash: `./k8s/deploy_model.sh <MODEL_NAME> latest api-models 1`
-   - PowerShell: `.\\k8s\\deploy_model.ps1 -ModelName <MODEL_NAME> -ModelVersion latest -Namespace api-models -Replicas 1`
-5. Test REST API:
-   - PowerShell smoke test: `.\\scripts\\test_models_rest_api.ps1 -GatewayUrl "http://localhost:8000"`
-
-If `gateway` is not externally reachable, use:
-
-```bash
-kubectl -n api-models port-forward svc/gateway 8000:8000
+```mermaid
+flowchart LR
+    C[Client / REST] --> G[Gateway Service]
+    G --> L[List/Predict Routing]
+    G --> D[Deploy Orchestrator]
+    D --> J[Kaniko Build Job]
+    J --> R[(Container Registry)]
+    D --> K8S[Deployment + Service]
+    K8S --> M[Model Service Pod]
+    M --> ML[(MLflow Tracking/Artifacts)]
 ```
 
-## REST API example
+## Quick Start
+
+### 1) Configure environment
+
+Copy `.env_example` to `.env` and set at least:
+
+1. `MLFLOW_TRACKING_URI`
+2. `REGISTRY_SERVER`
+3. `TU_ORG`
+4. `REGISTRY_USERNAME` / `REGISTRY_PASSWORD`
+5. `K8S_NAMESPACE` (default: `api-models`)
+
+### 2) Build and push shared images (`gateway`, `model_service`)
+
+PowerShell:
+
+```powershell
+.\k8s\build_images.ps1 -Tag 20260416-01 -RegistryPrefix <REGISTRY_SERVER>/<TU_ORG>
+```
+
+Bash:
 
 ```bash
-curl -X POST "http://localhost:8000/predict" \\
-  -H "Content-Type: application/json" \\
+./k8s/build_images.sh 20260416-01 <REGISTRY_SERVER>/<TU_ORG>
+```
+
+### 3) Deploy gateway
+
+PowerShell:
+
+```powershell
+.\k8s\deploy_gateway.ps1 -Namespace api-models
+kubectl -n api-models rollout status deploy/gateway --timeout=180s
+```
+
+Bash:
+
+```bash
+./k8s/deploy_gateway.sh api-models
+kubectl -n api-models rollout status deploy/gateway --timeout=180s
+```
+
+### 4) Deploy one model image (image-per-model flow)
+
+PowerShell:
+
+```powershell
+.\k8s\build_model_image_job.ps1 -ModelName tiny_demo_model -ModelVersion latest -Namespace api-models -Wait -InsecureRegistryTls
+.\k8s\deploy_model_image.ps1 -ModelName tiny_demo_model -ModelImage <REGISTRY_SERVER>/<TU_ORG>/model-tiny-demo-model:<tag> -Namespace api-models -Replicas 1
+```
+
+## Common API calls
+
+`<gateway_url>` can be LoadBalancer URL or `http://localhost:8000` via port-forward.
+
+### List models
+
+```bash
+curl -X POST "<gateway_url>/list_models" \
+  -H "Content-Type: application/json" \
+  -d "{}"
+```
+
+### Predict
+
+```bash
+curl -X POST "<gateway_url>/predict" \
+  -H "Content-Type: application/json" \
   -d '{
     "model_name": "tiny_demo_model",
-    "data": {"features": [1.0, 2.0, 3.0]}
+    "data": { "features": [1.0, 2.0, 3.0] }
   }'
 ```
 
-List discovered/configured models:
+### Start async deploy by endpoint
 
 ```bash
-curl -X POST "http://localhost:8000/list_models" \\
-  -H "Content-Type: application/json" \\
-  -d '{}'
+curl -X POST "<gateway_url>/deploy_model" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_name": "tiny_demo_model_2",
+    "model_version": "latest",
+    "namespace": "api-models",
+    "replicas": 1,
+    "deployed_name": "tiny_demo_model_2_prod",
+    "append_date": true
+  }'
 ```
 
-## Notes
+Use `deployed_name` as the `model_name` value in `/predict` when custom naming is enabled.
 
-- `MODEL_VERSION=latest` resolves to:
-  1. Highest version in `Production` stage, if available.
-  2. Otherwise highest numeric registered version.
-- You can bypass registry version resolution with `MODEL_URI` (for example `runs:/<RUN_ID>/model`).
+## Repository map
+
+| Path | Purpose |
+|---|---|
+| `gateway/` | API gateway service and deploy orchestration |
+| `model_service/` | Generic BentoML model runtime |
+| `k8s/` | Build/deploy scripts (`.sh`, `.ps1`) |
+| `k8s/bootstrap/` | One-time bootstrap scripts (secret + base image) |
+| `k8s/yaml/` | Optional static gateway manifest |
+| `examples/rest/` | Example request payloads |
+| `docs/` | Runbook, technical docs, phases/history |
+
+## Build behavior notes
+
+`k8s/build_images.*` is now Dockerfile-only for shared images (`gateway`, `model_service`).
+
+If `gateway/` and `model_service/` code/dependencies did not change, you can reuse existing published tags and skip rebuilding.
 
 ## Documentation
 
-- Kubernetes + MLflow workflow (archived): `docs/history/mlflow_to_k8s_workflow.md`
-- Kubernetes runbook (no `$env` commands): `docs/runbook.md`
-- Script-only deployment flow: `k8s/build_images.*`, `k8s/deploy_gateway.*`, `k8s/deploy_model.*`
-- Kubernetes YAML manifests are generated/applied by the scripts in `k8s/`.
-- Change log and execution notes: `docs/history/cambios_k8s_2026-04-08.md`
+1. Main runbook: `docs/runbook.md`
+2. Gateway technical details: `docs/gateway_technical.md`
+3. Phase docs: `docs/phases/`
+4. Historical notes: `docs/history/`

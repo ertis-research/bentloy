@@ -5,6 +5,8 @@ class DeployOperationRequest(TypedDict):
     namespace: str
     model_name: str
     model_slug: str
+    deployed_name: str
+    deployment_slug: str
     model_version: str
     model_uri: str
     tracking_uri: str
@@ -24,6 +26,7 @@ class DeployOperationRecord(TypedDict):
     created_at: str
     updated_at: str
     model_name: str
+    deployed_name: str
     model_version: str
     namespace: str
     replicas: int

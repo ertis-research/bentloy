@@ -1,0 +1,166 @@
+# ============================================================
+# GATEWAY STACK (ServiceAccount + RBAC + Deployment + Service)
+#
+# Este archivo se aplica tal cual con:
+#   kubectl apply -f k8s/yaml/gateway.yaml
+#
+# Cambios habituales (paso 5 de tu flujo):
+# 1) image: poner el tag que acabas de construir con build_images.ps1
+# 2) namespace: si NO usas api-models
+# 3) imagePullSecrets.name: si tu secret tiene otro nombre
+# 4) MLFLOW_TRACKING_URI / REGISTRY_SERVER / TU_ORG / MODEL_BASE_IMAGE
+# ============================================================
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  # Cambia solo si usas otro namespace.
+  namespace: api-models
+  # Normalmente no hace falta cambiar este nombre.
+  name: gateway-sa
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: api-models
+  # Nombre interno del rol que usa el gateway para descubrir servicios
+  # y lanzar jobs de despliegue.
+  name: gateway-service-discovery
+rules:
+  # Permisos para listar servicios/pods de modelos.
+  - apiGroups: [""]
+    resources: ["services", "pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Permisos para leer logs (util para diagnostico de despliegues).
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # Permisos sobre Deployments de modelos.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Permisos para crear/borrar Jobs de build.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  namespace: api-models
+  # Debe coincidir con el nombre del Role anterior.
+  name: gateway-service-discovery
+subjects:
+  - kind: ServiceAccount
+    # Debe coincidir con metadata.name del ServiceAccount.
+    name: gateway-sa
+    namespace: api-models
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  # Debe coincidir con metadata.name del Role.
+  name: gateway-service-discovery
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # Nombre del deployment de gateway.
+  name: gateway
+  namespace: api-models
+  labels:
+    app: gateway
+spec:
+  # Escala inicial (sube a 2+ si quieres alta disponibilidad).
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      # Debe existir (definido arriba).
+      serviceAccountName: gateway-sa
+      imagePullSecrets:
+        # IMPORTANTE: nombre del secret docker-registry en K8s.
+        # Si el tuyo se llama distinto, cambialo.
+        - name: model-registry-creds
+      containers:
+        - name: gateway
+          # IMPORTANTE (paso 5): pon aqui la imagen exacta que acabas de publicar.
+          # Ejemplo con tag fijo:
+          #   registry.example.com/api-models/model-gateway:20260415-1015
+          image: registry.example.com/api-models/model-gateway:20260413-01
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          env:
+            # Prefijo de servicios de modelo: model-<slug>
+            - name: MODEL_SERVICE_PREFIX
+              value: "model"
+            # Namespace donde gateway buscara servicios de modelos.
+            - name: MODEL_NAMESPACE
+              value: "api-models"
+            # Plantilla interna de URL hacia model services.
+            - name: MODEL_URL_TEMPLATE
+              value: "http://{service_name}:3000"
+            # IMPORTANTE: URL real de MLflow en tu entorno.
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow.example.com:5000"
+            # Datos de registry usados por el flujo de auto-deploy.
+            - name: REGISTRY_SERVER
+              value: "registry.example.com"
+            - name: TU_ORG
+              value: "api-models"
+            # Imagen base usada para construir imagenes de modelos.
+            - name: MODEL_BASE_IMAGE
+              value: "registry.example.com/api-models/model-service-base:py310"
+            # Secret que usa K8s para pull/push segun flujo.
+            - name: MODEL_REGISTRY_SECRET
+              value: "model-registry-creds"
+            # Imagen de Kaniko usada por auto-deploy de modelos.
+            - name: KANIKO_IMAGE
+              value: "gcr.io/kaniko-project/executor:v1.23.2-debug"
+            # En tu .env esta a 1 (TLS self-signed en registry).
+            - name: KANIKO_SKIP_TLS_VERIFY
+              value: "1"
+            # Mantener activado si quieres despliegue dinamico desde gateway.
+            - name: AUTO_DEPLOY_ENABLED
+              value: "1"
+            # Timeouts de build y rollout para operaciones de deploy.
+            - name: DEPLOY_BUILD_TIMEOUT_SEC
+              value: "1800"
+            - name: DEPLOY_ROLLOUT_TIMEOUT_SEC
+              value: "300"
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: api-models
+  labels:
+    app: gateway
+spec:
+  # LoadBalancer para exponer fuera del cluster (si tu entorno lo soporta).
+  type: LoadBalancer
+  selector:
+    app: gateway
+  ports:
+    - name: http
+      # Puerto externo del servicio.
+      port: 8000
+      # Puerto interno del contenedor gateway.
+      targetPort: 3000

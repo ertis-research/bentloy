@@ -141,6 +141,8 @@ class GatewayService:
         model_uri: str = "",
         target_image: str = "",
         insecure_registry_tls: bool = False,
+        deployed_name: str = "",
+        append_date: bool = False,
     ) -> dict[str, Any]:
         return await self.deploy_handler.deploy_model(
             model_name=model_name,
@@ -152,6 +154,8 @@ class GatewayService:
             model_uri=model_uri,
             target_image=target_image,
             insecure_registry_tls=insecure_registry_tls,
+            deployed_name=deployed_name,
+            append_date=append_date,
         )
 
     @bentoml.api

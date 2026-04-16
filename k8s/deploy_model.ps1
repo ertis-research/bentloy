@@ -3,7 +3,9 @@ param(
     [string]$ModelName,
     [string]$ModelVersion = "latest",
     [string]$Namespace = "",
-    [int]$Replicas = 1
+    [int]$Replicas = 1,
+    [string]$DeployedName = "",
+    [switch]$AppendDate
 )
 
 Set-StrictMode -Version Latest
@@ -93,7 +95,19 @@ if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
     throw "Error: kubectl is not installed or not in PATH."
 }
 
-$modelSlug = To-Slug -Text $ModelName
+$deployedNameEffective = if ([string]::IsNullOrWhiteSpace($DeployedName)) {
+    $ModelName
+}
+else {
+    $DeployedName.Trim()
+}
+
+if ($AppendDate.IsPresent) {
+    $dateSuffix = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
+    $deployedNameEffective = "{0}_{1}" -f $deployedNameEffective, $dateSuffix
+}
+
+$modelSlug = To-Slug -Text $deployedNameEffective
 $deployName = "{0}-{1}" -f $modelServicePrefix, $modelSlug
 $serviceName = "{0}-{1}" -f $modelServicePrefix, $modelSlug
 
@@ -221,6 +235,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ("Model deployed: {0} ({1})" -f $ModelName, $ModelVersion)
+Write-Host ("Deployed alias: {0}" -f $deployedNameEffective)
 Write-Host ("Namespace: {0}" -f $Namespace)
 Write-Host ("Internal service URL: http://{0}.{1}.svc.cluster.local:3000" -f $serviceName, $Namespace)
-Write-Host ("Call through gateway with model_name={0}" -f $ModelName)
+Write-Host ("Call through gateway with model_name={0}" -f $deployedNameEffective)
