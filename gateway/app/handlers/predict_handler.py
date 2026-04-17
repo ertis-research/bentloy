@@ -1,3 +1,5 @@
+"""Prediction request handlers for single and batch gateway calls."""
+
 from typing import Any, Callable
 
 import httpx
@@ -6,6 +8,8 @@ from ..routing.target_resolver import PredictTargetResolver
 
 
 def _default_client_factory(timeout: float) -> httpx.AsyncClient:
+    """Build the default async HTTP client used for prediction forwarding."""
+
     return httpx.AsyncClient(timeout=timeout)
 
 
@@ -30,13 +34,8 @@ class PredictHandler:
         data: dict[str, Any],
         model_url: str = "",
     ) -> dict[str, Any]:
-        """
-        Expected gateway input:
-        {
-          "model_name": "my_model",
-          "data": { ... model payload ... }
-        }
-        """
+        """Forward one prediction request to the resolved model endpoint."""
+
         try:
             url, base_url, _ = self.target_resolver.resolve_predict_target(
                 model_name=model_name,
@@ -68,7 +67,8 @@ class PredictHandler:
             }
 
     async def batch_predict(self, requests: list[dict[str, Any]]) -> dict[str, Any]:
-        """Batch predictions."""
+        """Process a batch of prediction requests and collect per-item results."""
+
         results: list[dict[str, Any]] = []
 
         async with self.client_factory(30.0) as client:

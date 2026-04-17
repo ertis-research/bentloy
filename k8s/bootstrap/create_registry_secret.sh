@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Create or update the Docker registry pull secret in Kubernetes.
 set -euo pipefail
 
 NAMESPACE="${1:-${K8S_NAMESPACE:-api-models}}"
@@ -8,6 +9,7 @@ REGISTRY_USERNAME="${REGISTRY_USERNAME:-}"
 REGISTRY_PASSWORD="${REGISTRY_PASSWORD:-}"
 REGISTRY_EMAIL="${REGISTRY_EMAIL:-noreply@example.com}"
 
+# Normalizes registry input and returns host[:port] without scheme or path.
 normalize_registry_server() {
   local value="${1:-}"
   value="${value#http://}"
@@ -16,10 +18,12 @@ normalize_registry_server() {
   echo "$value"
 }
 
+# Validates registry host[:port] format.
 is_valid_registry_server() {
   [[ "$1" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]]
 }
 
+# Imports KEY=VALUE pairs from .env only when variables are not already set.
 import_dotenv_without_override() {
   local dotenv_path="${1:-.env}"
   [[ -f "$dotenv_path" ]] || return 0

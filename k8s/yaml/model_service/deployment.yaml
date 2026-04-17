@@ -1,0 +1,49 @@
+# Template rendered by deploy_model scripts.
+# Do not apply directly without replacing placeholders.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: __DEPLOY_NAME__
+  namespace: __NAMESPACE__
+  labels:
+    app: model-service
+    model-slug: __MODEL_SLUG__
+spec:
+  replicas: __REPLICAS__
+  selector:
+    matchLabels:
+      app: model-service
+      model-slug: __MODEL_SLUG__
+  template:
+    metadata:
+      labels:
+        app: model-service
+        model-slug: __MODEL_SLUG__
+    spec:
+__IMAGE_PULL_SECRETS_BLOCK__
+      containers:
+        - name: model-service
+          image: "__MODEL_SERVICE_IMAGE__"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          env:
+            - name: MLFLOW_TRACKING_URI
+              value: "__MLFLOW_TRACKING_URI__"
+            - name: MODEL_NAME
+              value: "__MODEL_NAME__"
+            - name: MODEL_VERSION
+              value: "__MODEL_VERSION__"
+__MODEL_URI_ENV_BLOCK__
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 15

@@ -1,3 +1,5 @@
+"""Gateway information endpoints for health, discovery, and deploy summaries."""
+
 from typing import Any, Callable
 
 import httpx
@@ -7,6 +9,8 @@ from ..routing.discovery import KubernetesModelDiscovery
 
 
 def _default_client_factory(timeout: float) -> httpx.AsyncClient:
+    """Build the default async HTTP client used by info requests."""
+
     return httpx.AsyncClient(timeout=timeout)
 
 

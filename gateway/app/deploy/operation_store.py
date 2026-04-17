@@ -1,3 +1,5 @@
+"""Asynchronous in-memory storage for deployment operation state."""
+
 import asyncio
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -7,6 +9,8 @@ from ..domain.types import DeployOperationRecord
 
 
 def _now_iso_utc() -> str:
+    """Return the current UTC timestamp in ISO-8601 format."""
+
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -19,11 +23,15 @@ class DeployOperationStore:
         self._now_iso = now_iso or _now_iso_utc
 
     async def add(self, operation: DeployOperationRecord) -> None:
+        """Store a new operation record."""
+
         operation_id = operation["operation_id"]
         async with self._lock:
             self._operations[operation_id] = deepcopy(operation)
 
     async def get(self, operation_id: str) -> DeployOperationRecord | None:
+        """Fetch a copy of an operation by id."""
+
         async with self._lock:
             operation = self._operations.get(operation_id)
             if operation is None:
@@ -31,6 +39,8 @@ class DeployOperationStore:
             return deepcopy(operation)
 
     async def update(self, operation_id: str, **changes: Any) -> None:
+        """Apply partial changes to an existing operation and refresh its timestamp."""
+
         async with self._lock:
             operation = self._operations.get(operation_id)
             if operation is None:
@@ -39,6 +49,8 @@ class DeployOperationStore:
             operation["updated_at"] = self._now_iso()
 
     async def list_summaries(self, limit: int = 20) -> list[dict[str, str]]:
+        """Return recent operation summaries sorted by most recent update."""
+
         async with self._lock:
             summaries = [
                 {

@@ -1,3 +1,8 @@
+<#
+.SYNOPSIS
+Builds gateway and model_service images and optionally pushes them.
+#>
+
 param(
     [string]$Tag = "latest",
     [string]$RegistryPrefix = ""

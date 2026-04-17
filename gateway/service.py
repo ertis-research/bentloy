@@ -1,3 +1,5 @@
+"""Gateway Bento service entrypoint and API surface."""
+
 from datetime import datetime, timezone
 from typing import Any
 
@@ -40,6 +42,8 @@ class GatewayService:
     """API gateway that routes predictions to multiple models."""
 
     def __init__(self):
+        """Initialize runtime settings, dependencies, and request handlers."""
+
         settings = GatewaySettings.from_env()
         self.model_urls = settings.model_urls
         self.model_service_prefix = settings.model_service_prefix
@@ -121,12 +125,18 @@ class GatewayService:
         )
 
     def _now_iso(self) -> str:
+        """Return the current UTC timestamp in ISO-8601 format."""
+
         return datetime.now(timezone.utc).isoformat()
 
     def _resolve_k8s_auth(self) -> tuple[str, dict[str, str], str | bool]:
+        """Resolve in-cluster Kubernetes API authentication details."""
+
         return resolve_k8s_auth()
 
     async def _discover_k8s_model_services(self) -> tuple[list[dict[str, str]], str | None]:
+        """Discover model services from Kubernetes for dynamic routing metadata."""
+
         return await self.info_handler.discover_k8s_model_services()
 
     @bentoml.api
@@ -144,6 +154,8 @@ class GatewayService:
         deployed_name: str = "",
         append_date: bool = False,
     ) -> dict[str, Any]:
+        """Queue a model deployment operation managed by the gateway."""
+
         return await self.deploy_handler.deploy_model(
             model_name=model_name,
             model_version=model_version,
@@ -160,6 +172,8 @@ class GatewayService:
 
     @bentoml.api
     async def deploy_status(self, operation_id: str) -> dict[str, Any]:
+        """Return status details for a previously queued deploy operation."""
+
         return await self.deploy_handler.deploy_status(operation_id=operation_id)
 
     @bentoml.api
@@ -169,6 +183,8 @@ class GatewayService:
         data: dict[str, Any],
         model_url: str = "",
     ) -> dict[str, Any]:
+        """Forward one prediction request to the resolved model endpoint."""
+
         return await self.predict_handler.predict(
             model_name=model_name,
             data=data,
@@ -177,12 +193,18 @@ class GatewayService:
 
     @bentoml.api
     async def batch_predict(self, requests: list[dict]) -> dict[str, Any]:
+        """Forward a batch of prediction requests and aggregate responses."""
+
         return await self.predict_handler.batch_predict(requests=requests)
 
     @bentoml.api
     async def health(self) -> dict[str, Any]:
+        """Return gateway and configured model health information."""
+
         return await self.info_handler.health()
 
     @bentoml.api
     async def list_models(self) -> dict[str, Any]:
+        """List configured, discovered, and recently routed models."""
+
         return await self.info_handler.list_models()

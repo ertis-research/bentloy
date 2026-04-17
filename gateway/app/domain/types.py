@@ -1,7 +1,11 @@
+"""Typed dictionaries used by gateway deployment workflows."""
+
 from typing import TypedDict
 
 
 class DeployOperationRequest(TypedDict):
+    """Input payload required by the asynchronous deploy orchestrator."""
+
     namespace: str
     model_name: str
     model_slug: str
@@ -20,6 +24,8 @@ class DeployOperationRequest(TypedDict):
 
 
 class DeployOperationRecord(TypedDict):
+    """Persisted operation state exposed by deploy status endpoints."""
+
     operation_id: str
     status: str
     step: str

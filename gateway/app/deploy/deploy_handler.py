@@ -1,3 +1,5 @@
+"""Gateway deploy API logic for validation, queueing, and status retrieval."""
+
 import asyncio
 import re
 import uuid
@@ -46,6 +48,8 @@ class DeployHandler:
         self.now_iso = now_iso
 
     def _build_operation_id(self) -> str:
+        """Generate a sortable operation id with timestamp and random suffix."""
+
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
         suffix = uuid.uuid4().hex[:6]
         return f"op_{timestamp}_{suffix}"
@@ -58,6 +62,8 @@ class DeployHandler:
         registry_server: str,
         org: str,
     ) -> str:
+        """Build a deterministic target image reference for the model artifact."""
+
         model_version_slug = re.sub(r"[^a-z0-9._-]+", "-", model_version.lower()).strip("-")
         if not model_version_slug:
             model_version_slug = "latest"
@@ -84,6 +90,8 @@ class DeployHandler:
         deployed_name: str = "",
         append_date: bool = False,
     ) -> dict[str, Any]:
+        """Validate input, enqueue a deploy operation, and trigger async execution."""
+
         if not self.auto_deploy_enabled:
             return {"error": "Automatic deploy is disabled on this gateway."}
 
@@ -200,6 +208,8 @@ class DeployHandler:
         }
 
     async def deploy_status(self, operation_id: str) -> dict[str, Any]:
+        """Return the latest status snapshot for a queued deployment operation."""
+
         operation = await self.operation_store.get(operation_id)
         if not operation:
             return {"error": "operation_id not found", "operation_id": operation_id}

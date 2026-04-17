@@ -1,3 +1,5 @@
+"""Model service Bento entrypoint that serves one MLflow model instance."""
+
 from typing import Any
 
 import bentoml
@@ -27,6 +29,8 @@ class MLflowModelService:
     """
 
     def __init__(self):
+        """Load settings, instantiate handlers, and attempt model initialization."""
+
         settings = ModelServiceSettings.from_env()
 
         if not settings.model_name:
@@ -55,10 +59,14 @@ class MLflowModelService:
 
     @bentoml.api
     def predict(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Run one inference request against the loaded model."""
+
         return self.predict_handler.predict(model=self.model, data=data)
 
     @bentoml.api
     def health(self) -> dict[str, Any]:
+        """Return model loading and metadata health details."""
+
         return self.health_handler.health(
             model=self.model,
             model_version=self.model_version,

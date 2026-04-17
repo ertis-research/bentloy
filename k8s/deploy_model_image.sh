@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Deploy a prebuilt model image by delegating to deploy_model.sh.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

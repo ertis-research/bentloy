@@ -74,11 +74,10 @@ Source parser:
 
 ## 5) Packaging and container entry
 
-- Bento service reference: `gateway/bentofile.yaml` -> `service:GatewayService`
 - Docker command: `gateway/Dockerfile` -> `bentoml serve service:GatewayService ...`
-- Source include path: `service.py` and `app/**/*.py|yaml|yml|sh`
+- Source path: `gateway/service.py` and `gateway/app/**`
 
-## 6) Launch from zero (script-based)
+## 6) Launch from zero (YAML gateway)
 
 Canonical runbook:
 
@@ -93,8 +92,8 @@ Practical sequence:
    - `k8s/bootstrap/build_model_base_image.ps1`
 4. Build/push gateway + model-service images:
    - `k8s/build_images.ps1`
-5. Deploy gateway:
-   - `k8s/deploy_gateway.ps1`
+5. Apply gateway manifest:
+   - `kubectl apply -f k8s/yaml/gateway.yaml`
 6. Validate:
    - `kubectl rollout status deploy/gateway`
    - `kubectl get svc gateway -o wide`
@@ -107,7 +106,6 @@ Practical sequence:
 Notes:
 
 - If namespace and secret are already managed externally, steps 2 and namespace creation can be skipped.
-- `deploy_gateway.ps1` imports `.env` automatically when present.
 - Gateway exposure is configured as `Service.type=LoadBalancer`; the intended access path is external LB endpoint.
 
 ## 7) Verification status in repository

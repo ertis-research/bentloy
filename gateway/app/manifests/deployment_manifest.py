@@ -1,3 +1,5 @@
+"""Deployment manifest builder for model-service runtime pods."""
+
 from typing import Any
 
 from .template_loader import load_template_yaml
@@ -15,6 +17,8 @@ def build_deployment_manifest(
     registry_secret: str,
     model_service_prefix: str,
 ) -> dict[str, Any]:
+    """Render and customize a Deployment manifest for one model-service instance."""
+
     manifest = load_template_yaml("deployment.yaml")
 
     deploy_name = f"{model_service_prefix}-{model_slug}"

@@ -1,3 +1,5 @@
+"""Authentication helpers for in-cluster access to the Kubernetes API."""
+
 import os
 from typing import Mapping
 
@@ -7,6 +9,12 @@ def resolve_k8s_auth(
     token_path: str = "/var/run/secrets/kubernetes.io/serviceaccount/token",
     ca_path: str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
 ) -> tuple[str, dict[str, str], str | bool]:
+    """Resolve Kubernetes API base URL, auth headers, and TLS verification mode.
+
+    Raises:
+        RuntimeError: If in-cluster environment variables or token files are missing.
+    """
+
     source = env if env is not None else os.environ
     kube_host = source.get("KUBERNETES_SERVICE_HOST")
     kube_port = source.get("KUBERNETES_SERVICE_PORT_HTTPS", "443")

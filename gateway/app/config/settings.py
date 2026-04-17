@@ -1,3 +1,5 @@
+"""Environment-based settings loading for the gateway service."""
+
 import os
 from dataclasses import dataclass
 from typing import Mapping
@@ -7,6 +9,8 @@ from ..domain.helpers import as_bool, normalize_registry_server, positive_int_fr
 
 @dataclass(frozen=True)
 class GatewaySettings:
+    """Runtime configuration required by gateway routing and deploy features."""
+
     model_urls: dict[str, str]
     model_service_prefix: str
     model_namespace: str
@@ -24,6 +28,11 @@ class GatewaySettings:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "GatewaySettings":
+        """Build settings from environment variables.
+
+        The loader scans `MODELO_*_URL` variables and converts them into
+        model-name-to-base-url mappings used by the prediction router.
+        """
         source = env if env is not None else os.environ
 
         model_urls: dict[str, str] = {}

@@ -1,3 +1,4 @@
+# Prepare a model build context for Kaniko using MLflow artifacts.
 set -euo pipefail
 python -m pip install --no-cache-dir mlflow==3.10.0 'PyYAML>=6.0'
 python - <<'PY'

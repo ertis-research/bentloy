@@ -1,3 +1,8 @@
+<#
+.SYNOPSIS
+Builds and pushes the shared model-service base image.
+#>
+
 param(
     [string]$Org = "",
     [string]$Tag = "py310",
@@ -10,6 +15,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $false
 
+# Normalizes registry input and returns host[:port] without scheme or path.
 function Normalize-RegistryServer {
     param([string]$Value)
 
@@ -36,11 +42,13 @@ function Normalize-RegistryServer {
     return ($candidate -split "/", 2)[0].Trim()
 }
 
+# Validates registry host[:port] format.
 function Test-ValidRegistryServer {
     param([string]$Value)
     return [Regex]::IsMatch($Value, "^[A-Za-z0-9.-]+(:[0-9]+)?$")
 }
 
+# Imports KEY=VALUE pairs from .env into the current process.
 function Import-DotEnv {
     param([string]$Path = ".env")
     if (-not (Test-Path -LiteralPath $Path)) {

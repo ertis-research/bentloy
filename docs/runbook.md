@@ -107,12 +107,12 @@ Bash:
 These scripts are Dockerfile-only for shared images.  
 If neither source code nor dependencies changed in `gateway/` and `model_service/`, you can reuse previously published tags and skip this step.
 
-### 3.5 Deploy gateway
+### 3.5 Deploy gateway (YAML)
 
 PowerShell:
 
 ```powershell
-.\k8s\deploy_gateway.ps1 -Namespace api-models
+kubectl apply -f .\k8s\yaml\gateway.yaml
 kubectl -n api-models rollout status deploy/gateway --timeout=180s
 kubectl -n api-models get deploy,svc,pods
 ```
@@ -120,7 +120,7 @@ kubectl -n api-models get deploy,svc,pods
 Bash:
 
 ```bash
-./k8s/deploy_gateway.sh api-models
+kubectl apply -f ./k8s/yaml/gateway.yaml
 kubectl -n api-models rollout status deploy/gateway --timeout=180s
 kubectl -n api-models get deploy,svc,pods
 ```
@@ -166,6 +166,7 @@ Notes:
 1. `ModelName` is still the MLflow source model.
 2. `DeployedName` controls Kubernetes resource naming and the `model_name` you call in gateway `/predict`.
 3. `AppendDate` appends `YYYYMMDD` to `DeployedName`.
+4. Manifests are rendered from templates: `k8s/yaml/model_service/deployment.yaml` and `k8s/yaml/model_service/service.yaml`.
 
 ## 5) Deploy by gateway endpoint (async)
 
@@ -229,7 +230,7 @@ curl -X POST "<gateway_url>/predict" \
 |---|---|
 | Registry credentials changed | `create_registry_secret.*` |
 | Base runtime dependencies changed | `build_model_base_image.*` |
-| Gateway/model_service source changed | `build_images.*` + `deploy_gateway.*` |
+| Gateway/model_service source changed | `build_images.*` + `kubectl apply -f k8s/yaml/gateway.yaml` |
 | New model only | `build_model_image_job.*` + `deploy_model_image.*` |
 | Cluster/namespace recreated | Full bootstrap from section 3 |
 

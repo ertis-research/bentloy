@@ -1,3 +1,5 @@
+"""Minimal Kubernetes API client operations used by deployment workflows."""
+
 import asyncio
 from typing import Any
 
@@ -5,6 +7,8 @@ import httpx
 
 
 class KubernetesApiClient:
+    """Provide high-level async helpers over raw Kubernetes HTTP calls."""
+
     async def get_job_pod_name(
         self,
         client: httpx.AsyncClient,
@@ -13,6 +17,8 @@ class KubernetesApiClient:
         namespace: str,
         job_name: str,
     ) -> str | None:
+        """Return the newest pod name created for a given Job, if available."""
+
         pods_url = f"{base_url}/api/v1/namespaces/{namespace}/pods"
         response = await client.get(
             pods_url,
@@ -41,6 +47,8 @@ class KubernetesApiClient:
         job_name: str,
         container: str,
     ) -> str:
+        """Read recent logs for a Job container, returning an empty string on failure."""
+
         pod_name = await self.get_job_pod_name(
             client=client,
             base_url=base_url,
@@ -69,6 +77,8 @@ class KubernetesApiClient:
         resource_url: str,
         manifest: dict[str, Any],
     ) -> None:
+        """Create or merge-patch a Kubernetes resource from a manifest."""
+
         get_response = await client.get(resource_url, headers=headers)
         if get_response.status_code == 404:
             create_response = await client.post(list_url, headers=headers, json=manifest)
@@ -101,6 +111,8 @@ class KubernetesApiClient:
         replicas: int,
         timeout_sec: int,
     ) -> None:
+        """Poll a Deployment until all requested replicas are updated and ready."""
+
         start = asyncio.get_running_loop().time()
         while asyncio.get_running_loop().time() - start < timeout_sec:
             response = await client.get(deployment_url, headers=headers)

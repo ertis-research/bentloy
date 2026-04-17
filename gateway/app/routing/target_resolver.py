@@ -1,3 +1,5 @@
+"""Routing target resolution for prediction requests."""
+
 from urllib.parse import urlparse
 
 from ..domain.helpers import to_model_slug
@@ -20,6 +22,8 @@ class PredictTargetResolver:
         self.model_url_template = model_url_template
 
     def resolve_model_base_url(self, model_name: str) -> tuple[str, bool]:
+        """Resolve the base URL for a model and flag whether it came from env config."""
+
         model_key = model_name.lower()
         if model_key in self.model_urls:
             return self.model_urls[model_key], True
@@ -37,6 +41,8 @@ class PredictTargetResolver:
         )
 
     def normalize_external_model_url(self, model_url: str) -> str:
+        """Validate and normalize an explicit external model URL."""
+
         normalized = (model_url or "").strip()
         if not normalized:
             raise ValueError("model_url is empty.")
@@ -56,6 +62,8 @@ class PredictTargetResolver:
         model_name: str,
         model_url: str = "",
     ) -> tuple[str, str, str]:
+        """Resolve predict URL, base URL, and source used for request routing."""
+
         explicit_url = (model_url or "").strip()
         if explicit_url:
             normalized = self.normalize_external_model_url(explicit_url)

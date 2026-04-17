@@ -1,3 +1,4 @@
+# Base template used by gateway manifest builders.
 apiVersion: batch/v1
 kind: Job
 metadata:

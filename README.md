@@ -50,19 +50,19 @@ Bash:
 ./k8s/build_images.sh 20260416-01 <REGISTRY_SERVER>/<TU_ORG>
 ```
 
-### 3) Deploy gateway
+### 3) Deploy gateway (YAML)
 
 PowerShell:
 
 ```powershell
-.\k8s\deploy_gateway.ps1 -Namespace api-models
+kubectl apply -f .\k8s\yaml\gateway.yaml
 kubectl -n api-models rollout status deploy/gateway --timeout=180s
 ```
 
 Bash:
 
 ```bash
-./k8s/deploy_gateway.sh api-models
+kubectl apply -f ./k8s/yaml/gateway.yaml
 kubectl -n api-models rollout status deploy/gateway --timeout=180s
 ```
 
@@ -123,7 +123,7 @@ Use `deployed_name` as the `model_name` value in `/predict` when custom naming i
 | `model_service/` | Generic BentoML model runtime |
 | `k8s/` | Build/deploy scripts (`.sh`, `.ps1`) |
 | `k8s/bootstrap/` | One-time bootstrap scripts (secret + base image) |
-| `k8s/yaml/` | Optional static gateway manifest |
+| `k8s/yaml/` | Canonical gateway and template manifests |
 | `examples/rest/` | Example request payloads |
 | `docs/` | Runbook, technical docs, phases/history |
 
@@ -137,5 +137,6 @@ If `gateway/` and `model_service/` code/dependencies did not change, you can reu
 
 1. Main runbook: `docs/runbook.md`
 2. Gateway technical details: `docs/gateway_technical.md`
-3. Phase docs: `docs/phases/`
-4. Historical notes: `docs/history/`
+3. K8s script function reference: `docs/k8s_scripts_function_reference.md`
+4. Phase docs: `docs/phases/`
+5. Historical notes: `docs/history/`

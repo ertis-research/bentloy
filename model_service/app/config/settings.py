@@ -1,3 +1,5 @@
+"""Environment-based configuration loading for model_service."""
+
 import os
 from dataclasses import dataclass
 from typing import Mapping
@@ -5,6 +7,8 @@ from typing import Mapping
 
 @dataclass(frozen=True)
 class ModelServiceSettings:
+    """Runtime settings required to load and serve an MLflow model."""
+
     mlflow_tracking_uri: str
     model_name: str
     model_version: str
@@ -12,6 +16,8 @@ class ModelServiceSettings:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "ModelServiceSettings":
+        """Build settings from environment variables with sensible defaults."""
+
         source = env if env is not None else os.environ
 
         model_name = source.get("MODEL_NAME", "").strip()

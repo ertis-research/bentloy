@@ -21,6 +21,23 @@ No `envsubst`, no Compose, no extra tooling.
 kubectl apply -f k8s/yaml/gateway.yaml
 ```
 
+## Model Service Templates
+
+`k8s/deploy_model.ps1` and `k8s/deploy_model.sh` now render model manifests from:
+
+- `k8s/yaml/model_service/deployment.yaml`
+- `k8s/yaml/model_service/service.yaml`
+
+These files are templates with placeholders, not static manifests to apply directly.
+
+## Model Image Build Job Template
+
+`k8s/build_model_image_job.ps1` and `k8s/build_model_image_job.sh` now render the Job manifest from:
+
+- `k8s/yaml/model_image_job/job.yaml`
+
+This file is a template with placeholders, not a static manifest to apply directly.
+
 ## Validate
 
 ```bash

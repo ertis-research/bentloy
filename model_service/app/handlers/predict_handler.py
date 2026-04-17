@@ -1,3 +1,5 @@
+"""Prediction handler for the model_service runtime."""
+
 from typing import Any
 
 import numpy as np
@@ -5,10 +7,14 @@ import pandas as pd
 
 
 class PredictHandler:
+    """Normalize request payloads and execute model predictions."""
+
     def __init__(self, model_name: str):
         self.model_name = model_name
 
     def predict(self, model: Any, data: dict[str, Any]) -> dict[str, Any]:
+        """Run prediction and return a gateway-compatible response payload."""
+
         if model is None:
             return {"error": "Model not available"}
 

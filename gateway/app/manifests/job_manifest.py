@@ -1,9 +1,13 @@
+"""Job manifest builder for model-image build operations."""
+
 from typing import Any
 
 from .template_loader import load_template_text, load_template_yaml
 
 
 def _find_named_item(items: list[dict[str, Any]], name: str) -> dict[str, Any]:
+    """Return a named element from a list of template items."""
+
     for item in items:
         if item.get("name") == name:
             return item
@@ -24,6 +28,8 @@ def build_job_manifest(
     insecure_registry_tls: bool,
     registry_server: str,
 ) -> dict[str, Any]:
+    """Render and customize the Job manifest used to build model images."""
+
     manifest = load_template_yaml("job.yaml")
     prepare_script = load_template_text("prepare_build_context.sh")
 

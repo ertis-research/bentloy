@@ -1,3 +1,8 @@
+<#
+.SYNOPSIS
+Deploys one model_service instance from template manifests.
+#>
+
 param(
     [Parameter(Mandatory = $true)]
     [string]$ModelName,
@@ -12,6 +17,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Continue"
 $PSNativeCommandUseErrorActionPreference = $false
 
+# Imports KEY=VALUE pairs from .env only when variables are not already set in the process.
 function Import-DotEnv {
     param([string]$Path = ".env")
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -46,6 +52,7 @@ function Import-DotEnv {
     }
 }
 
+# Converts a free-form name into a Kubernetes-safe slug.
 function To-Slug {
     param([string]$Text)
 
@@ -56,14 +63,38 @@ function To-Slug {
     return $slug
 }
 
+# Validates Kubernetes DNS label format.
 function Test-ValidK8sName {
     param([string]$Value)
     return [Regex]::IsMatch($Value, "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 }
 
+# Validates allowed characters for a container image reference.
 function Test-ValidImageRef {
     param([string]$Value)
     return [Regex]::IsMatch($Value, "^[a-z0-9./:_-]+$")
+}
+
+# Escapes backslashes and quotes for YAML double-quoted string values.
+function Escape-YamlDoubleQuoted {
+    param([string]$Value)
+
+    $escaped = $Value.Replace("\", "\\")
+    return $escaped.Replace('"', '\"')
+}
+
+# Replaces placeholder tokens in a template file with runtime values.
+function Render-Template {
+    param(
+        [string]$TemplatePath,
+        [hashtable]$Replacements
+    )
+
+    $content = Get-Content -LiteralPath $TemplatePath -Raw
+    foreach ($key in $Replacements.Keys) {
+        $content = $content.Replace($key, [string]$Replacements[$key])
+    }
+    return $content
 }
 
 Import-DotEnv
@@ -145,12 +176,26 @@ if (-not $namespaceExists) {
     }
 }
 
+$scriptDir = Split-Path -Parent $PSCommandPath
+$templateDir = Join-Path (Join-Path $scriptDir "yaml") "model_service"
+$deploymentTemplatePath = Join-Path $templateDir "deployment.yaml"
+$serviceTemplatePath = Join-Path $templateDir "service.yaml"
+
+if (-not (Test-Path -LiteralPath $deploymentTemplatePath)) {
+    throw "Missing template file: $deploymentTemplatePath"
+}
+if (-not (Test-Path -LiteralPath $serviceTemplatePath)) {
+    throw "Missing template file: $serviceTemplatePath"
+}
+
 $modelUriEnvBlock = ""
 if (-not [string]::IsNullOrWhiteSpace($modelUri)) {
+    $escapedModelUri = Escape-YamlDoubleQuoted -Value $modelUri
     $modelUriEnvBlock = @"
             - name: MODEL_URI
-              value: "$modelUri"
+              value: "$escapedModelUri"
 "@
+    $modelUriEnvBlock = $modelUriEnvBlock.TrimEnd("`r", "`n")
 }
 
 $imagePullSecretsBlock = ""
@@ -159,75 +204,26 @@ if (-not [string]::IsNullOrWhiteSpace($modelRegistrySecret)) {
       imagePullSecrets:
         - name: $modelRegistrySecret
 "@
+    $imagePullSecretsBlock = $imagePullSecretsBlock.TrimEnd("`r", "`n")
 }
 
-$manifest = @"
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: $deployName
-  namespace: $Namespace
-  labels:
-    app: model-service
-    model-slug: $modelSlug
-spec:
-  replicas: $Replicas
-  selector:
-    matchLabels:
-      app: model-service
-      model-slug: $modelSlug
-  template:
-    metadata:
-      labels:
-        app: model-service
-        model-slug: $modelSlug
-    spec:
-$imagePullSecretsBlock
-      containers:
-        - name: model-service
-          image: $modelServiceImage
-          imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 3000
-          env:
-            - name: MLFLOW_TRACKING_URI
-              value: "$mlflowTrackingUri"
-            - name: MODEL_NAME
-              value: "$ModelName"
-            - name: MODEL_VERSION
-              value: "$ModelVersion"
-$modelUriEnvBlock
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: 3000
-            initialDelaySeconds: 10
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /livez
-              port: 3000
-            initialDelaySeconds: 20
-            periodSeconds: 15
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: $serviceName
-  namespace: $Namespace
-  labels:
-    app: model-service
-    model-slug: $modelSlug
-spec:
-  type: ClusterIP
-  selector:
-    app: model-service
-    model-slug: $modelSlug
-  ports:
-    - name: http
-      port: 3000
-      targetPort: 3000
-"@
+$replacements = @{
+    "__DEPLOY_NAME__" = $deployName
+    "__SERVICE_NAME__" = $serviceName
+    "__NAMESPACE__" = $Namespace
+    "__MODEL_SLUG__" = $modelSlug
+    "__REPLICAS__" = [string]$Replicas
+    "__MODEL_SERVICE_IMAGE__" = (Escape-YamlDoubleQuoted -Value $modelServiceImage)
+    "__MLFLOW_TRACKING_URI__" = (Escape-YamlDoubleQuoted -Value $mlflowTrackingUri)
+    "__MODEL_NAME__" = (Escape-YamlDoubleQuoted -Value $ModelName)
+    "__MODEL_VERSION__" = (Escape-YamlDoubleQuoted -Value $ModelVersion)
+    "__IMAGE_PULL_SECRETS_BLOCK__" = $imagePullSecretsBlock
+    "__MODEL_URI_ENV_BLOCK__" = $modelUriEnvBlock
+}
+
+$deploymentManifest = Render-Template -TemplatePath $deploymentTemplatePath -Replacements $replacements
+$serviceManifest = Render-Template -TemplatePath $serviceTemplatePath -Replacements $replacements
+$manifest = "$deploymentManifest`n---`n$serviceManifest`n"
 
 $manifest | & kubectl apply -f - | Out-Host
 if ($LASTEXITCODE -ne 0) {

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Build gateway and model_service images, and optionally push to a registry.
 set -euo pipefail
 
 TAG="${1:-latest}"

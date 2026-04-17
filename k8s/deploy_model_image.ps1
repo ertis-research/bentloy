@@ -1,3 +1,8 @@
+<#
+.SYNOPSIS
+Deploys a prebuilt model image by delegating to deploy_model.ps1.
+#>
+
 param(
     [Parameter(Mandatory = $true)]
     [string]$ModelName,

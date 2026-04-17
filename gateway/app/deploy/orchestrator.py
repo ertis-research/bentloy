@@ -1,3 +1,5 @@
+"""Asynchronous deployment orchestration against the Kubernetes API."""
+
 import asyncio
 from typing import Any, Callable
 
@@ -9,6 +11,8 @@ from .operation_store import DeployOperationStore
 
 
 def _default_http_client_factory(verify: str | bool) -> httpx.AsyncClient:
+    """Create the default HTTP client used for Kubernetes API interactions."""
+
     return httpx.AsyncClient(timeout=20.0, verify=verify)
 
 
@@ -42,6 +46,8 @@ class DeployOrchestrator:
         self.http_client_factory = http_client_factory or _default_http_client_factory
 
     async def run_operation(self, operation_id: str) -> None:
+        """Execute one queued deployment operation end-to-end."""
+
         operation = await self.operation_store.get(operation_id)
         if operation is None:
             return

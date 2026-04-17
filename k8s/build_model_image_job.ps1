@@ -1,3 +1,8 @@
+<#
+.SYNOPSIS
+Submits a Kubernetes Job that builds a model image from MLflow artifacts.
+#>
+
 param(
     [Parameter(Mandatory = $true)]
     [string]$ModelName,
@@ -14,6 +19,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $false
 
+# Normalizes registry input and returns host[:port] without scheme or path.
 function Normalize-RegistryServer {
     param([string]$Value)
 
@@ -40,6 +46,7 @@ function Normalize-RegistryServer {
     return ($candidate -split "/", 2)[0].Trim()
 }
 
+# Imports KEY=VALUE pairs from .env into the current process.
 function Import-DotEnv {
     param([string]$Path = ".env")
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -71,6 +78,7 @@ function Import-DotEnv {
     }
 }
 
+# Converts a model name into a deterministic Kubernetes slug.
 function To-Slug {
     param([string]$Text)
     $slug = $Text.ToLowerInvariant().Replace("_", "-")
@@ -79,21 +87,25 @@ function To-Slug {
     return $slug.Trim("-")
 }
 
+# Validates Kubernetes DNS label format.
 function Test-ValidK8sName {
     param([string]$Value)
     return [Regex]::IsMatch($Value, "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 }
 
+# Validates allowed characters for a container image reference.
 function Test-ValidImageRef {
     param([string]$Value)
     return [Regex]::IsMatch($Value, "^[a-z0-9./:_-]+$")
 }
 
+# Validates registry host[:port] format.
 function Test-ValidRegistryServer {
     param([string]$Value)
     return [Regex]::IsMatch($Value, "^[A-Za-z0-9.-]+(:[0-9]+)?$")
 }
 
+# Parses common truthy values (1/true/yes) from text.
 function Test-TrueLikeValue {
     param([string]$Value)
 
@@ -107,6 +119,28 @@ function Test-TrueLikeValue {
         "yes" { return $true }
         default { return $false }
     }
+}
+
+# Escapes backslashes and quotes for YAML double-quoted string values.
+function Escape-YamlDoubleQuoted {
+    param([string]$Value)
+
+    $escaped = $Value.Replace("\", "\\")
+    return $escaped.Replace('"', '\"')
+}
+
+# Replaces placeholder tokens in a template file with runtime values.
+function Render-Template {
+    param(
+        [string]$TemplatePath,
+        [hashtable]$Replacements
+    )
+
+    $content = Get-Content -LiteralPath $TemplatePath -Raw
+    foreach ($key in $Replacements.Keys) {
+        $content = $content.Replace($key, [string]$Replacements[$key])
+    }
+    return $content
 }
 
 Import-DotEnv
@@ -202,9 +236,9 @@ if ($skipTlsVerify) {
     Write-Warning "TLS verification is disabled for Kaniko registry operations."
 }
 
-$kanikoExtraArgsYaml = ""
+$kanikoExtraArgsBlock = ""
 if ($kanikoExtraArgs.Count -gt 0) {
-    $kanikoExtraArgsYaml = "`n" + (($kanikoExtraArgs | ForEach-Object { "            - $_" }) -join "`n")
+    $kanikoExtraArgsBlock = ($kanikoExtraArgs | ForEach-Object { "            - $_" }) -join "`n"
 }
 
 if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
@@ -234,236 +268,28 @@ if ($LASTEXITCODE -ne 0) {
     throw "Secret '$registrySecret' not found in namespace '$Namespace'."
 }
 
-$manifest = @"
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: $jobName
-  namespace: $Namespace
-  labels:
-    app: model-image-build
-    model-slug: $modelSlug
-spec:
-  backoffLimit: 0
-  ttlSecondsAfterFinished: 3600
-  template:
-    metadata:
-      labels:
-        app: model-image-build
-        model-slug: $modelSlug
-    spec:
-      restartPolicy: Never
-      automountServiceAccountToken: false
-      securityContext:
-        seccompProfile:
-          type: RuntimeDefault
-      imagePullSecrets:
-        - name: $registrySecret
-      volumes:
-        - name: workspace
-          emptyDir: {}
-        - name: registry-creds
-          secret:
-            secretName: $registrySecret
-            items:
-              - key: .dockerconfigjson
-                path: config.json
-      initContainers:
-        - name: prepare-build-context
-          image: python:3.10-slim
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-          resources:
-            requests:
-              cpu: "250m"
-              memory: "512Mi"
-            limits:
-              cpu: "1000m"
-              memory: "2Gi"
-          env:
-            - name: MLFLOW_TRACKING_URI
-              value: "$mlflowTrackingUri"
-            - name: MODEL_NAME
-              value: "$ModelName"
-            - name: MODEL_VERSION
-              value: "$ModelVersion"
-            - name: MODEL_URI
-              value: "$ModelUri"
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              set -euo pipefail
-              python -m pip install --no-cache-dir mlflow==3.10.0 'PyYAML>=6.0'
-              python - <<'PY'
-              import json
-              import os
-              import re
-              import shutil
-              import textwrap
-              from pathlib import Path
-              import mlflow
-              from mlflow.tracking import MlflowClient
-              import yaml
+$scriptDir = Split-Path -Parent $PSCommandPath
+$templatePath = Join-Path (Join-Path (Join-Path $scriptDir "yaml") "model_image_job") "job.yaml"
+if (-not (Test-Path -LiteralPath $templatePath)) {
+    throw "Missing template file: $templatePath"
+}
 
-              tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "").strip()
-              model_name = os.environ["MODEL_NAME"]
-              model_version = os.getenv("MODEL_VERSION", "latest").strip() or "latest"
-              explicit_model_uri = os.getenv("MODEL_URI", "").strip()
+$replacements = @{
+    "__JOB_NAME__" = $jobName
+    "__NAMESPACE__" = $Namespace
+    "__MODEL_SLUG__" = $modelSlug
+    "__REGISTRY_SECRET__" = $registrySecret
+    "__MLFLOW_TRACKING_URI__" = (Escape-YamlDoubleQuoted -Value $mlflowTrackingUri)
+    "__MODEL_NAME__" = (Escape-YamlDoubleQuoted -Value $ModelName)
+    "__MODEL_VERSION__" = (Escape-YamlDoubleQuoted -Value $ModelVersion)
+    "__MODEL_URI__" = (Escape-YamlDoubleQuoted -Value $ModelUri)
+    "__KANIKO_IMAGE__" = $kanikoImage
+    "__TARGET_IMAGE__" = $TargetImage
+    "__BASE_IMAGE__" = $baseImage
+    "__KANIKO_TLS_ARGS_BLOCK__" = $kanikoExtraArgsBlock
+}
 
-              if tracking_uri:
-                  mlflow.set_tracking_uri(tracking_uri)
-
-              workspace = Path("/workspace/context")
-              workspace.mkdir(parents=True, exist_ok=True)
-              download_root = Path("/workspace/download")
-              if download_root.exists():
-                  shutil.rmtree(download_root)
-              download_root.mkdir(parents=True, exist_ok=True)
-
-              def resolve_model_uri() -> str:
-                  if explicit_model_uri:
-                      return explicit_model_uri
-                  if model_version != "latest":
-                      return f"models:/{model_name}/{model_version}"
-
-                  client = MlflowClient()
-                  latest_versions = client.get_registered_model(model_name).latest_versions
-                  if not latest_versions:
-                      raise ValueError(f"No registered versions for model '{model_name}'.")
-
-                  production_versions = [
-                      v.version
-                      for v in latest_versions
-                      if (v.current_stage or "").lower() == "production" and v.version
-                  ]
-                  if production_versions:
-                      chosen_version = max(production_versions, key=lambda value: int(value))
-                      return f"models:/{model_name}/{chosen_version}"
-
-                  available_versions = [v.version for v in latest_versions if v.version]
-                  chosen_version = max(available_versions, key=lambda value: int(value))
-                  return f"models:/{model_name}/{chosen_version}"
-
-              resolved_model_uri = resolve_model_uri()
-              downloaded_path = Path(
-                  mlflow.artifacts.download_artifacts(
-                      artifact_uri=resolved_model_uri,
-                      dst_path=str(download_root),
-                  )
-              )
-
-              model_dst = workspace / "model"
-              if model_dst.exists():
-                  shutil.rmtree(model_dst)
-              shutil.copytree(downloaded_path, model_dst)
-
-              def package_key(requirement: str) -> str:
-                  requirement = requirement.strip()
-                  if not requirement:
-                      return ""
-                  token = re.split(r"[<>=!~\\[\\s]", requirement, maxsplit=1)[0]
-                  return token.lower().replace("_", "-")
-
-              def load_requirements() -> list[str]:
-                  collected: list[str] = []
-
-                  for path in (model_dst / "requirements.txt", model_dst / "pip_requirements.txt"):
-                      if not path.exists():
-                          continue
-                      for raw_line in path.read_text(encoding="utf-8").splitlines():
-                          line = raw_line.strip()
-                          if line and not line.startswith("#"):
-                              collected.append(line)
-
-                  conda_path = model_dst / "conda.yaml"
-                  if conda_path.exists():
-                      data = yaml.safe_load(conda_path.read_text(encoding="utf-8")) or {}
-                      for entry in data.get("dependencies", []):
-                          if isinstance(entry, dict) and "pip" in entry:
-                              for req in entry.get("pip") or []:
-                                  line = str(req).strip()
-                                  if line and not line.startswith("#"):
-                                      collected.append(line)
-                  return collected
-
-              base_packages = {"bentoml", "mlflow", "numpy", "pandas"}
-              filtered_requirements: list[str] = []
-              seen_packages: set[str] = set()
-
-              for requirement in load_requirements():
-                  key = package_key(requirement)
-                  if not key or key in base_packages or key in seen_packages:
-                      continue
-                  seen_packages.add(key)
-                  filtered_requirements.append(requirement)
-
-              requirements_path = workspace / "extra_requirements.txt"
-              if filtered_requirements:
-                  requirements_path.write_text("\n".join(filtered_requirements) + "\n", encoding="utf-8")
-              else:
-                  requirements_path.write_text("", encoding="utf-8")
-
-              dockerfile_content = textwrap.dedent(
-                  """\
-                  ARG BASE_IMAGE
-                  FROM `${BASE_IMAGE}
-                  WORKDIR /app
-                  COPY model /models/model
-                  COPY extra_requirements.txt /tmp/extra_requirements.txt
-                  RUN if [ -s /tmp/extra_requirements.txt ]; then pip install --no-cache-dir -r /tmp/extra_requirements.txt; fi
-                  ENV MODEL_URI=/models/model
-                  """
-              )
-              (workspace / "Dockerfile").write_text(dockerfile_content, encoding="utf-8")
-
-              metadata = {
-                  "model_name": model_name,
-                  "model_version_requested": model_version,
-                  "model_uri_resolved": resolved_model_uri,
-                  "extra_requirements": filtered_requirements,
-              }
-              (workspace / "build_meta.json").write_text(
-                  json.dumps(metadata, indent=2),
-                  encoding="utf-8",
-              )
-
-              print("Prepared model build context at /workspace/context")
-              print(json.dumps(metadata, indent=2))
-              PY
-          volumeMounts:
-            - name: workspace
-              mountPath: /workspace
-      containers:
-        - name: kaniko
-          image: $kanikoImage
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            allowPrivilegeEscalation: false
-          resources:
-            requests:
-              cpu: "500m"
-              memory: "1Gi"
-            limits:
-              cpu: "2000m"
-              memory: "4Gi"
-          args:
-            - --dockerfile=/workspace/context/Dockerfile
-            - --context=dir:///workspace/context
-            - --destination=$TargetImage
-            - --build-arg=BASE_IMAGE=$baseImage
-            - --snapshot-mode=redo
-            - --use-new-run
-$kanikoExtraArgsYaml
-          volumeMounts:
-            - name: workspace
-              mountPath: /workspace
-            - name: registry-creds
-              mountPath: /kaniko/.docker
-              readOnly: true
-"@
+$manifest = Render-Template -TemplatePath $templatePath -Replacements $replacements
 
 $manifest | & kubectl apply -f - | Out-Host
 if ($LASTEXITCODE -ne 0) {

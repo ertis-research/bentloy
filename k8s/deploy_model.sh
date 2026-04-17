@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Deploy one model_service instance from template manifests.
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
@@ -12,7 +13,12 @@ NAMESPACE="${3:-${K8S_NAMESPACE:-api-models}}"
 REPLICAS="${4:-1}"
 DEPLOYED_NAME="${5:-}"
 APPEND_DATE="${6:-false}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATE_DIR="$SCRIPT_DIR/yaml/model_service"
+DEPLOYMENT_TEMPLATE="$TEMPLATE_DIR/deployment.yaml"
+SERVICE_TEMPLATE="$TEMPLATE_DIR/service.yaml"
 
+# Imports KEY=VALUE pairs from .env only when variables are not already set.
 import_dotenv_without_override() {
   local dotenv_path="${1:-.env}"
   [[ -f "$dotenv_path" ]] || return 0
@@ -58,14 +64,17 @@ if [[ -z "$MODEL_REGISTRY_SECRET" && "$MODEL_SERVICE_IMAGE" =~ ^[a-z0-9.-]+(:[0-
   MODEL_REGISTRY_SECRET="model-registry-creds"
 fi
 
+# Validates Kubernetes DNS label format.
 is_valid_k8s_name() {
   [[ "$1" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]
 }
 
+# Validates allowed characters for a container image reference.
 is_valid_image_ref() {
   [[ "$1" =~ ^[a-z0-9./:_-]+$ ]]
 }
 
+# Parses common truthy values (1/true/yes/on) from text.
 is_true() {
   local value="${1:-}"
   value="$(echo "$value" | tr '[:upper:]' '[:lower:]')"
@@ -82,11 +91,41 @@ if ! command -v kubectl >/dev/null 2>&1; then
   exit 1
 fi
 
+# Converts a free-form name into a Kubernetes-safe slug.
 to_slug() {
   echo "$1" \
     | tr '[:upper:]' '[:lower:]' \
     | tr '_' '-' \
     | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//; s/-+/-/g'
+}
+
+# Escapes backslashes and quotes for YAML double-quoted string values.
+escape_yaml_dq() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+
+# Replaces placeholder tokens in a template file with runtime values.
+render_template() {
+  local template_path="$1"
+  local rendered
+
+  rendered="$(<"$template_path")"
+  rendered="${rendered//__DEPLOY_NAME__/$DEPLOY_NAME}"
+  rendered="${rendered//__SERVICE_NAME__/$SERVICE_NAME}"
+  rendered="${rendered//__NAMESPACE__/$NAMESPACE}"
+  rendered="${rendered//__MODEL_SLUG__/$MODEL_SLUG}"
+  rendered="${rendered//__REPLICAS__/$REPLICAS}"
+  rendered="${rendered//__MODEL_SERVICE_IMAGE__/$MODEL_SERVICE_IMAGE_ESCAPED}"
+  rendered="${rendered//__MLFLOW_TRACKING_URI__/$MLFLOW_TRACKING_URI_ESCAPED}"
+  rendered="${rendered//__MODEL_NAME__/$MODEL_NAME_ESCAPED}"
+  rendered="${rendered//__MODEL_VERSION__/$MODEL_VERSION_ESCAPED}"
+  rendered="${rendered//__IMAGE_PULL_SECRETS_BLOCK__/$IMAGE_PULL_SECRETS_BLOCK}"
+  rendered="${rendered//__MODEL_URI_ENV_BLOCK__/$MODEL_URI_ENV_BLOCK}"
+
+  printf '%s' "$rendered"
 }
 
 DEPLOYED_NAME_EFFECTIVE="${DEPLOYED_NAME:-$MODEL_NAME}"
@@ -119,11 +158,22 @@ is_valid_image_ref "$MODEL_SERVICE_IMAGE" || {
   exit 1
 }
 
+[[ -f "$DEPLOYMENT_TEMPLATE" ]] || {
+  echo "Error: missing template file '$DEPLOYMENT_TEMPLATE'."
+  exit 1
+}
+
+[[ -f "$SERVICE_TEMPLATE" ]] || {
+  echo "Error: missing template file '$SERVICE_TEMPLATE'."
+  exit 1
+}
+
 MODEL_URI_ENV_BLOCK=""
 if [[ -n "$MODEL_URI" ]]; then
+  MODEL_URI_ESCAPED="$(escape_yaml_dq "$MODEL_URI")"
   MODEL_URI_ENV_BLOCK=$(cat <<EOF
             - name: MODEL_URI
-              value: "${MODEL_URI}"
+              value: "${MODEL_URI_ESCAPED}"
 EOF
 )
 fi
@@ -144,73 +194,14 @@ fi
 
 kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 || kubectl create namespace "$NAMESPACE"
 
-cat <<EOF | kubectl apply -f -
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: ${DEPLOY_NAME}
-  namespace: ${NAMESPACE}
-  labels:
-    app: model-service
-    model-slug: ${MODEL_SLUG}
-spec:
-  replicas: ${REPLICAS}
-  selector:
-    matchLabels:
-      app: model-service
-      model-slug: ${MODEL_SLUG}
-  template:
-    metadata:
-      labels:
-        app: model-service
-        model-slug: ${MODEL_SLUG}
-    spec:
-${IMAGE_PULL_SECRETS_BLOCK}
-      containers:
-        - name: model-service
-          image: ${MODEL_SERVICE_IMAGE}
-          imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 3000
-          env:
-            - name: MLFLOW_TRACKING_URI
-              value: "${MLFLOW_TRACKING_URI}"
-            - name: MODEL_NAME
-              value: "${MODEL_NAME}"
-            - name: MODEL_VERSION
-              value: "${MODEL_VERSION}"
-${MODEL_URI_ENV_BLOCK}
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: 3000
-            initialDelaySeconds: 10
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /livez
-              port: 3000
-            initialDelaySeconds: 20
-            periodSeconds: 15
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: ${SERVICE_NAME}
-  namespace: ${NAMESPACE}
-  labels:
-    app: model-service
-    model-slug: ${MODEL_SLUG}
-spec:
-  type: ClusterIP
-  selector:
-    app: model-service
-    model-slug: ${MODEL_SLUG}
-  ports:
-    - name: http
-      port: 3000
-      targetPort: 3000
-EOF
+MODEL_SERVICE_IMAGE_ESCAPED="$(escape_yaml_dq "$MODEL_SERVICE_IMAGE")"
+MLFLOW_TRACKING_URI_ESCAPED="$(escape_yaml_dq "$MLFLOW_TRACKING_URI")"
+MODEL_NAME_ESCAPED="$(escape_yaml_dq "$MODEL_NAME")"
+MODEL_VERSION_ESCAPED="$(escape_yaml_dq "$MODEL_VERSION")"
+
+DEPLOYMENT_MANIFEST="$(render_template "$DEPLOYMENT_TEMPLATE")"
+SERVICE_MANIFEST="$(render_template "$SERVICE_TEMPLATE")"
+printf '%s\n---\n%s\n' "$DEPLOYMENT_MANIFEST" "$SERVICE_MANIFEST" | kubectl apply -f -
 
 echo "Model deployed: ${MODEL_NAME} (${MODEL_VERSION})"
 echo "Deployed alias: ${DEPLOYED_NAME_EFFECTIVE}"

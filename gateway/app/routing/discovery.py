@@ -1,3 +1,5 @@
+"""Kubernetes service discovery for dynamically deployed model endpoints."""
+
 from typing import Any, Callable
 
 import httpx
@@ -6,6 +8,8 @@ from ..domain.helpers import slug_to_model_name
 
 
 class KubernetesModelDiscovery:
+    """Discover model services that follow the configured naming convention."""
+
     def __init__(
         self,
         model_service_prefix: str,
@@ -24,6 +28,8 @@ class KubernetesModelDiscovery:
         headers: dict[str, str],
         verify: str | bool,
     ) -> tuple[list[dict[str, str]], str | None]:
+        """Return discovered model services and an optional discovery error message."""
+
         url = f"{base_url}/api/v1/namespaces/{self.model_namespace}/services"
 
         try:
