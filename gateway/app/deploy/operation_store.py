@@ -60,9 +60,16 @@ class DeployOperationStore:
                     "deployed_name": operation["deployed_name"],
                     "image_ref": operation["image_ref"],
                     "updated_at": operation["updated_at"],
+                    "error": operation.get("error")
                 }
                 for operation in self._operations.values()
             ]
 
         summaries.sort(key=lambda item: item["updated_at"], reverse=True)
         return summaries[:limit]
+
+    async def delete(self, operation_id: str) -> None:
+        """Completely remove an operation from the store to free up memory."""
+        async with self._lock:
+            # pop() removes the key if it exists, and does nothing if it doesn't
+            self._operations.pop(operation_id, None)

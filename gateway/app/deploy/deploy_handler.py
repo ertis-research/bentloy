@@ -5,6 +5,9 @@ import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
+import traceback
+import httpx
+from urllib.parse import quote_plus
 
 from ..domain.helpers import (
     is_valid_image_ref,
@@ -229,3 +232,86 @@ class DeployHandler:
             "created_at": operation["created_at"],
             "updated_at": operation["updated_at"],
         }
+
+    async def delete_operation(self, operation_id: str):
+
+        """Delete the model for a queued deployment operation"""
+
+        operation = await self.operation_store.get(operation_id)
+
+        if not operation:
+            return {
+                "status": "error",
+                "message": f"Operation {operation_id} not found."
+            }
+
+        # 2. Update the status so the UI/Client knows it's being deleted
+        await self.operation_store.update(operation_id, status="deleting")
+
+        # 3. Spawn the background task for K8s and Registry cleanup
+
+        asyncio.create_task(self.delete_operation_from_store(
+            operation_id=operation_id,
+            operation_store=self.operation_store,
+            registry_secret=self.registry_secret
+        ))
+
+        return {"status": "pending deletion"}
+
+    async def delete_operation_from_store(
+            self, 
+            operation_id: str,
+            operation_store: Any,
+            registry_secret: str
+        ) -> None:
+        """Background task to delete K8s resources and container images."""
+        
+        operation = await operation_store.get(operation_id)
+        if not operation:
+            return
+
+        deployed_name = operation.get("deployed_name")
+        image_ref = operation.get("image_ref")
+        build_job_name = operation.get("k8s_job")
+        namespace = operation.get("namespace", self.model_namespace)
+
+        try:
+            # 1. Delete Kubernetes Resources ONLY if we have a name
+            if deployed_name:
+                await self.deploy_orchestrator._delete_k8s_resources(deployed_name, build_job_name, namespace)
+            else:
+                print(f"Skipping K8s deletion for {operation_id}: No deployed_name found.")
+
+            # 2. Delete Registry Image
+            try:
+                if image_ref:
+                    await self.deploy_orchestrator._delete_registry_image(image_ref, namespace, deployed_name, registry_secret)
+            except Exception as img_err:
+                print(f"Image not deleted: {img_err}")
+                
+            # 3. Mark as successfully deleted
+            await operation_store.delete(operation_id)
+
+        except Exception as e:
+            # Log the full error to your console/terminal so you can read it!
+            print(f"FAILED to delete operation {operation_id}:")
+            traceback.print_exc() 
+            
+            # Save a better error string
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            
+            await operation_store.update(
+                operation_id, 
+                status="delete_failed", 
+                error=error_msg
+            )
+
+    async def delete_model(self, service_name: str):
+        """
+        Deletes a deployed model completely:
+        1. Fetches the Deployment to discover the image_ref and registry_secret.
+        2. Deletes the K8s Deployment and Service (which cascades to Pods).
+        3. Triggers the background Job to delete the image from the registry.
+        """
+        return (await self.deploy_orchestrator.delete_deployed_model(service_name=service_name, namespace=self.model_namespace))
+        

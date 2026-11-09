@@ -30,7 +30,7 @@ rules:
   # Permissions to read/list/watch model Services and Pods.
   - apiGroups: [""]
     resources: ["services", "pods"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Permission to read pod logs for deployment diagnostics.
   - apiGroups: [""]
     resources: ["pods/log"]
@@ -38,7 +38,7 @@ rules:
   # Permissions over model Deployments.
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Permissions for build Job lifecycle.
   - apiGroups: ["batch"]
     resources: ["jobs"]
@@ -92,7 +92,7 @@ spec:
           # Example with explicit tag:
           #   registry.example.com/api-models/model-gateway:20260415-1015
           image: registry.example.com/api-models/model-gateway:20260416-02
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - containerPort: 3000
           env:

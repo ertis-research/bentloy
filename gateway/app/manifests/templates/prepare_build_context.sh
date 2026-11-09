@@ -1,6 +1,6 @@
 # Prepare a model build context for Kaniko using MLflow artifacts.
 set -euo pipefail
-python -m pip install --no-cache-dir mlflow==3.10.0 'PyYAML>=6.0'
+python -m pip install --no-cache-dir mlflow==3.17.2 'PyYAML>=6.0' 'pyarrow<24'
 python - <<'PY'
 import json
 import os
@@ -108,6 +108,10 @@ for requirement in load_requirements():
     seen_packages.add(key)
     filtered_requirements.append(requirement)
 
+if filtered_requirements:
+    filtered_requirements.append("pyarrow<24")
+# ----------------------
+
 requirements_path = workspace / "extra_requirements.txt"
 if filtered_requirements:
     requirements_path.write_text("\n".join(filtered_requirements) + "\n", encoding="utf-8")
@@ -121,7 +125,7 @@ dockerfile_content = textwrap.dedent(
     WORKDIR /app
     COPY model /models/model
     COPY extra_requirements.txt /tmp/extra_requirements.txt
-    RUN if [ -s /tmp/extra_requirements.txt ]; then pip install --no-cache-dir -r /tmp/extra_requirements.txt; fi
+    RUN if [ -s /tmp/extra_requirements.txt ]; then pip freeze > /tmp/base_constraints.txt && pip install --default-timeout=1000 --retries=10 --no-cache-dir -c /tmp/base_constraints.txt -r /tmp/extra_requirements.txt; fi
     ENV MODEL_URI=/models/model
     """
 )

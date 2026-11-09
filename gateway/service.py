@@ -32,6 +32,7 @@ except ImportError:
     from app.kubernetes.client import KubernetesApiClient
     from app.manifests.deployment_manifest import build_deployment_manifest
     from app.manifests.job_manifest import build_job_manifest
+    from app.manifests.job_manifest import build_delete_job_manifest
     from app.manifests.service_manifest import build_service_manifest
     from app.routing.discovery import KubernetesModelDiscovery
     from app.routing.target_resolver import PredictTargetResolver
@@ -78,6 +79,7 @@ class GatewayService:
             k8s_client=self.k8s_client,
             resolve_k8s_auth=self._resolve_k8s_auth,
             build_job_manifest=build_job_manifest,
+            build_delete_job_manifest=build_delete_job_manifest,
             build_deployment_manifest=build_deployment_manifest,
             build_service_manifest=build_service_manifest,
             kaniko_image=self.kaniko_image,
@@ -204,7 +206,18 @@ class GatewayService:
         return await self.info_handler.health()
 
     @bentoml.api
-    async def list_models(self) -> dict[str, Any]:
+    async def list_models(self, page: int = 0, page_size: int = 10, query: str = "") -> dict[str, Any]:
         """List configured, discovered, and recently routed models."""
 
-        return await self.info_handler.list_models()
+        return await self.info_handler.list_models(page, page_size, query)
+
+    @bentoml.api
+    async def delete_operation(self, operation_id: str):
+        """Delete oepration from system"""
+        await self.deploy_handler.delete_operation(operation_id)
+
+    @bentoml.api
+    async def delete_model(self, service_name: str):
+        """Delete model from system"""
+        await self.deploy_handler.delete_model(service_name)
+    

@@ -56,8 +56,8 @@ def build_job_manifest(
         "--context=dir:///workspace/context",
         f"--destination={target_image}",
         f"--build-arg=BASE_IMAGE={base_image}",
-        "--snapshot-mode=redo",
-        "--use-new-run",
+        "--single-snapshot",           # <--- ADD THIS
+        "--compressed-caching=false",  # <--- ADD THIS,
     ]
     if insecure_registry_tls:
         kaniko_args.extend(["--skip-tls-verify", "--skip-tls-verify-pull"])
@@ -67,5 +67,73 @@ def build_job_manifest(
     kaniko_container = _find_named_item(pod_spec["containers"], "kaniko")
     kaniko_container["image"] = kaniko_image
     kaniko_container["args"] = kaniko_args
+
+    return manifest
+
+def build_delete_job_manifest(
+    job_name: str,
+    namespace: str,
+    model_slug: str,
+    image_ref: str,
+    registry_secret: str,
+    insecure_registry_tls: bool = False,
+) -> dict[str, Any]:
+    """Render and customize the Job manifest used to delete model images via Crane."""
+    
+    manifest = load_template_yaml("delete-job.yaml")
+
+    # Update metadata
+    manifest["metadata"]["name"] = job_name
+    manifest["metadata"]["namespace"] = namespace
+    manifest["metadata"]["labels"]["model-slug"] = model_slug
+
+    # Update pod template metadata
+    manifest["spec"]["template"]["metadata"]["labels"]["model-slug"] = model_slug
+
+    pod_spec = manifest["spec"]["template"]["spec"]
+    
+    # Update registry secret
+    pod_spec["imagePullSecrets"] = [{"name": registry_secret}]
+    registry_creds_volume = _find_named_item(pod_spec["volumes"], "registry-creds")
+    registry_creds_volume["secret"]["secretName"] = registry_secret
+
+    crane_container = _find_named_item(pod_spec["containers"], "crane")
+    
+    # ---------------------------------------------------------
+    # NEW LOGIC: Resolve the digest before deleting
+    # ---------------------------------------------------------
+    crane_script = """
+    set -e
+    IMAGE="$1"
+    shift
+    OPTS="$@"
+    
+    echo "Target Image: $IMAGE"
+    
+    # If the image already contains '@', it's already a digest
+    if echo "$IMAGE" | grep -q '@'; then
+        crane delete $OPTS "$IMAGE"
+    else
+        # 1. Fetch the exact sha256 digest from the registry
+        DIGEST=$(crane digest $OPTS "$IMAGE")
+        echo "Resolved digest: $DIGEST"
+        
+        # 2. Extract base image (removes the tag, safely ignores port colons)
+        BASE_IMAGE="${IMAGE%:*}"
+        
+        # 3. Delete using the base image + digest
+        echo "Executing: crane delete $OPTS ${BASE_IMAGE}@${DIGEST}"
+        crane delete $OPTS "${BASE_IMAGE}@${DIGEST}"
+    fi
+    """
+
+    # We use 'sh -c' to run the script. The '--' assigns arguments correctly 
+    # so $1 is the image_ref, and the rest ($@) are the optional crane flags.
+    crane_command = ["sh", "-c", crane_script, "--", image_ref]
+    
+    if insecure_registry_tls:
+        crane_command.append("--insecure")
+        
+    crane_container["command"] = crane_command
 
     return manifest
