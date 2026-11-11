@@ -47,12 +47,17 @@ class PredictHandler:
             else:
                 predictions = model.predict(pd.DataFrame([data]))
 
-            if hasattr(predictions, "tolist"):
+            if hasattr(predictions, "to_dict"):
+                # Handle Pandas DataFrame outputs
+                predictions = predictions.to_dict(orient="records")
+            elif hasattr(predictions, "tolist"):
+                # Handle Numpy array outputs
                 predictions = predictions.tolist()
             elif not isinstance(predictions, list):
+                # Handle basic iterables
                 predictions = list(predictions)
 
-            return {"model": self.model_name, "predictions": predictions}
+            return {"model": self.model_name, "predictions": predictions, "hola": "adios"}
         except Exception as exc:
             return {"error": str(exc), "model": self.model_name}
 
