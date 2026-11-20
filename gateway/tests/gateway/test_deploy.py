@@ -9,6 +9,8 @@ from gateway.app.deploy.orchestrator import DeployOrchestrator
 from gateway.app.domain.types import DeployOperationRecord, DeployOperationRequest
 from gateway.service import GatewayService
 
+RUN_ID = "0123456789abcdef0123456789abcdef"
+
 
 def _build_request(job_name: str = "build-model-tiny-demo-abc123") -> DeployOperationRequest:
     return {
@@ -18,7 +20,9 @@ def _build_request(job_name: str = "build-model-tiny-demo-abc123") -> DeployOper
         "deployed_name": "tiny_demo_model",
         "deployment_slug": "tiny-demo-model",
         "model_version": "latest",
-        "model_uri": "",
+        "run_id": RUN_ID,
+        "experiment_name": "Tiny Demo",
+        "model_uri": f"runs:/{RUN_ID}/ludwig-model",
         "tracking_uri": "http://mlflow:5000",
         "replicas": 1,
         "target_image": "registry.example.com/api-models/model-tiny-demo:latest",
@@ -44,6 +48,9 @@ def _build_operation(
         "model_name": request["model_name"],
         "deployed_name": request["deployed_name"],
         "model_version": request["model_version"],
+        "run_id": request["run_id"],
+        "model_uri": request["model_uri"],
+        "experiment_name": request["experiment_name"],
         "namespace": request["namespace"],
         "replicas": request["replicas"],
         "image_ref": request["target_image"],
@@ -130,6 +137,39 @@ class DeployOperationStoreTest(unittest.IsolatedAsyncioTestCase):
 
         summaries = await store.list_summaries(limit=2)
         self.assertEqual([item["operation_id"] for item in summaries], ["op_b", "op_a"])
+        self.assertEqual(summaries[0]["run_id"], RUN_ID)
+        self.assertEqual(summaries[0]["model_uri"], f"runs:/{RUN_ID}/ludwig-model")
+        self.assertEqual(summaries[0]["experiment_name"], "Tiny Demo")
+
+    async def test_list_summaries_filters_by_experiment_and_run(self) -> None:
+        store = DeployOperationStore(now_iso=lambda: "2026-04-15T10:00:00+00:00")
+        other_run = "f" * 32
+        other_request = {
+            **_build_request("build-model-b"),
+            "run_id": other_run,
+            "experiment_name": "Other",
+        }
+        await store.add(_build_operation("op_a", _build_request("build-model-a")))
+        await store.add(_build_operation("op_b", other_request))  # type: ignore[arg-type]
+        legacy = _build_operation("op_c", _build_request("build-model-c"))
+        for key in ("run_id", "model_uri", "experiment_name"):
+            legacy.pop(key)  # type: ignore[misc]
+        await store.add(legacy)
+
+        by_experiment = await store.list_summaries(experiment_name="Tiny Demo")
+        self.assertEqual([item["operation_id"] for item in by_experiment], ["op_a"])
+        # Exact match: no substring or case-insensitive matching.
+        self.assertEqual(await store.list_summaries(experiment_name="tiny demo"), [])
+        self.assertEqual(await store.list_summaries(experiment_name="Tiny"), [])
+        by_run = await store.list_summaries(run_id=other_run)
+        self.assertEqual([item["operation_id"] for item in by_run], ["op_b"])
+
+        everything = {item["operation_id"]: item for item in await store.list_summaries()}
+        self.assertEqual(set(everything), {"op_a", "op_b", "op_c"})
+        # Operations recorded without these fields report null.
+        self.assertIsNone(everything["op_c"]["run_id"])
+        self.assertIsNone(everything["op_c"]["model_uri"])
+        self.assertIsNone(everything["op_c"]["experiment_name"])
 
 
 class DeployOrchestratorTest(unittest.IsolatedAsyncioTestCase):
@@ -140,6 +180,7 @@ class DeployOrchestratorTest(unittest.IsolatedAsyncioTestCase):
         await store.add(operation)
 
         fake_k8s = _FakeKubernetesApiClient()
+        builder_calls: dict[str, dict] = {}
 
         def handler(request_obj: httpx.Request) -> httpx.Response:
             if (
@@ -165,12 +206,11 @@ class DeployOrchestratorTest(unittest.IsolatedAsyncioTestCase):
                 False,
             ),
             build_job_manifest=lambda **kwargs: {"metadata": {"name": kwargs["job_name"]}},
-            build_deployment_manifest=lambda **kwargs: {
-                "metadata": {"name": f"model-{kwargs['model_slug']}"}
-            },
-            build_service_manifest=lambda namespace, model_slug, model_service_prefix: {
-                "metadata": {"name": f"model-{model_slug}"}
-            },
+            build_delete_job_manifest=lambda **kwargs: {"metadata": {"name": kwargs["job_name"]}},
+            build_deployment_manifest=lambda **kwargs: builder_calls.setdefault(
+                "deployment", kwargs
+            ),
+            build_service_manifest=lambda **kwargs: builder_calls.setdefault("service", kwargs),
             kaniko_image="gcr.io/kaniko-project/executor:v1.23.2-debug",
             model_service_prefix="model",
             build_timeout_sec=10,
@@ -191,6 +231,14 @@ class DeployOrchestratorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["message"], "Deployment completed successfully.")
         self.assertEqual(len(fake_k8s.ensure_calls), 2)
         self.assertEqual(len(fake_k8s.wait_calls), 1)
+        # The container loads the model baked into the image; the MLflow URI goes to metadata.
+        self.assertEqual(builder_calls["deployment"]["model_uri"], "/models/model")
+        for kind in ("deployment", "service"):
+            self.assertEqual(builder_calls[kind]["run_id"], RUN_ID)
+            self.assertEqual(
+                builder_calls[kind]["source_model_uri"], f"runs:/{RUN_ID}/ludwig-model"
+            )
+            self.assertEqual(builder_calls[kind]["experiment_name"], "Tiny Demo")
 
     async def test_run_operation_job_creation_error_marks_failed(self) -> None:
         store = DeployOperationStore(now_iso=lambda: "2026-04-15T11:05:00+00:00")
@@ -218,11 +266,12 @@ class DeployOrchestratorTest(unittest.IsolatedAsyncioTestCase):
                 False,
             ),
             build_job_manifest=lambda **kwargs: {"metadata": {"name": kwargs["job_name"]}},
+            build_delete_job_manifest=lambda **kwargs: {"metadata": {"name": kwargs["job_name"]}},
             build_deployment_manifest=lambda **kwargs: {
                 "metadata": {"name": f"model-{kwargs['model_slug']}"}
             },
-            build_service_manifest=lambda namespace, model_slug, model_service_prefix: {
-                "metadata": {"name": f"model-{model_slug}"}
+            build_service_manifest=lambda **kwargs: {
+                "metadata": {"name": f"model-{kwargs['model_slug']}"}
             },
             kaniko_image="gcr.io/kaniko-project/executor:v1.23.2-debug",
             model_service_prefix="model",
@@ -243,6 +292,56 @@ class DeployOrchestratorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["step"], "failed")
         self.assertIsNotNone(result["error"])
         self.assertIn("Job creation failed (500)", result["error"] or "")
+        self.assertEqual(result["error_log"], "boom")
+
+    async def test_run_operation_build_failure_splits_reason_and_log(self) -> None:
+        store = DeployOperationStore(now_iso=lambda: "2026-04-15T11:05:00+00:00")
+        request = _build_request(job_name="build-model-push-abc123")
+        await store.add(_build_operation("op_push", request))
+
+        class _LogsK8s(_FakeKubernetesApiClient):
+            async def read_job_logs(self, client, base_url, headers, namespace, job_name, container):
+                if container == "kaniko":
+                    return (
+                        "\x1b[36mINFO\x1b[0m[0000] Retrieving image manifest\n"
+                        "error checking push permissions: UNAUTHORIZED: "
+                        "unauthorized to access repository\n"
+                    )
+                return "Model downloaded.\n"
+
+        def handler(request_obj: httpx.Request) -> httpx.Response:
+            if request_obj.method == "POST":
+                return httpx.Response(status_code=201, json={"kind": "Job"})
+            return httpx.Response(status_code=200, json={"status": {"failed": 1}})
+
+        transport = httpx.MockTransport(handler)
+        orchestrator = DeployOrchestrator(
+            operation_store=store,
+            k8s_client=_LogsK8s(),  # type: ignore[arg-type]
+            resolve_k8s_auth=lambda: ("https://kubernetes.default.svc", {}, False),
+            build_job_manifest=lambda **kwargs: {"metadata": {"name": kwargs["job_name"]}},
+            build_delete_job_manifest=lambda **kwargs: {},
+            build_deployment_manifest=lambda **kwargs: {},
+            build_service_manifest=lambda **kwargs: {},
+            kaniko_image="kaniko",
+            model_service_prefix="model",
+            build_timeout_sec=10,
+            rollout_timeout_sec=10,
+            http_client_factory=lambda verify: httpx.AsyncClient(transport=transport, verify=False),
+        )
+
+        await orchestrator.run_operation("op_push")
+        result = await store.get("op_push")
+        assert result is not None
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("Registry push denied", result["error"] or "")
+        self.assertIn("model-registry-creds", result["error"] or "")
+        self.assertNotIn("Retrieving image manifest", result["error"] or "")
+        self.assertIn("Retrieving image manifest", result["error_log"] or "")
+        self.assertIn("[prepare-build-context]\nModel downloaded.", result["error_log"] or "")
+
+        summaries = await store.list_summaries()
+        self.assertNotIn("error_log", summaries[0])
 
 
 class GatewayDeployApiTest(unittest.IsolatedAsyncioTestCase):
@@ -290,11 +389,159 @@ class GatewayDeployApiTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertRegex(response["deployed_name"], r"^tiny_alias_[0-9]{8}$")
-        self.assertRegex(response["k8s_job"], r"^build-model-tiny-alias-[0-9]{8}-[a-z0-9]{6}$")
+        self.assertRegex(response["k8s_job"], r"^bentloy-build-tiny-alias-[0-9]{8}-[a-z0-9]{6}$")
 
         operation_id = response["operation_id"]
         status = await service.deploy_status(operation_id)
         self.assertRegex(status["deployed_name"], r"^tiny_alias_[0-9]{8}$")
+
+    async def test_deploy_model_stores_run_and_experiment(self) -> None:
+        service = GatewayService()
+        service.model_base_image = "registry.example.com/api-models/model-service-base:py310"
+        service.deploy_handler.model_base_image = service.model_base_image
+        service.deploy_orchestrator.run_operation = AsyncMock(return_value=None)
+        service.info_handler.discover_k8s_model_services = AsyncMock(return_value=([], None))
+
+        model_uri = f"runs:/{RUN_ID}/ludwig-model"
+        response = await service.deploy_model(
+            model_name="churn_v2",
+            run_id=RUN_ID,
+            model_uri=model_uri,
+            experiment_name="Churn prediction",
+            target_image="registry.example.com/api-models/model-churn:latest",
+        )
+        self.assertEqual(response["run_id"], RUN_ID)
+        self.assertEqual(response["model_uri"], model_uri)
+        self.assertEqual(response["experiment_name"], "Churn prediction")
+
+        operation = await service.operation_store.get(response["operation_id"])
+        assert operation is not None
+        for record in (operation, operation["request"]):
+            self.assertEqual(record["run_id"], RUN_ID)
+            self.assertEqual(record["model_uri"], model_uri)
+            self.assertEqual(record["experiment_name"], "Churn prediction")
+
+        status = await service.deploy_status(response["operation_id"])
+        self.assertEqual(status["run_id"], RUN_ID)
+        self.assertEqual(status["model_uri"], model_uri)
+        self.assertEqual(status["experiment_name"], "Churn prediction")
+
+        listing = await service.list_models(experiment_name="Churn prediction")
+        self.assertEqual(
+            [op["operation_id"] for op in listing["deploy_operations"]],
+            [response["operation_id"]],
+        )
+        self.assertEqual(listing["deploy_operations"][0]["run_id"], RUN_ID)
+        self.assertEqual(listing["deploy_operations"][0]["model_uri"], model_uri)
+        self.assertEqual(
+            (await service.list_models(experiment_name="Other"))["deploy_operations"], []
+        )
+
+
+class _FakeResponse:
+    def __init__(self) -> None:
+        self.status_code = 200
+
+
+class _FakeContext:
+    def __init__(self) -> None:
+        self.response = _FakeResponse()
+
+
+class GatewayDeployErrorsTest(unittest.IsolatedAsyncioTestCase):
+    def _service(self) -> GatewayService:
+        service = GatewayService()
+        service.deploy_orchestrator.run_operation = AsyncMock(return_value=None)
+        service.deploy_handler.model_base_image = "registry.example.com/api-models/base:py312"
+        return service
+
+    async def _deploy(self, service: GatewayService, **kwargs) -> tuple[int, dict]:
+        ctx = _FakeContext()
+        params = {
+            "model_name": "tiny_demo_model",
+            "tracking_uri": "http://mlflow:5000",
+            "target_image": "registry.example.com/api-models/model-tiny-demo:latest",
+            **kwargs,
+        }
+        result = await service.deploy_model(ctx=ctx, **params)
+        return ctx.response.status_code, result
+
+    async def test_validation_errors_answer_400_with_detail(self) -> None:
+        service = self._service()
+        cases = {
+            "replicas must be >= 1.": {"replicas": 0},
+            "Invalid model_name": {"model_name": "!!!"},
+            "Invalid namespace": {"namespace": "Bad_NS"},
+            "Invalid run_id": {"run_id": "a" * 64},
+            "Invalid target_image": {"target_image": "UPPER/CASE"},
+        }
+        for expected, kwargs in cases.items():
+            with self.subTest(expected=expected):
+                status_code, body = await self._deploy(service, **kwargs)
+                self.assertEqual(status_code, 400)
+                self.assertIn(expected, body["detail"])
+                self.assertEqual(body["error"], body["detail"])
+                self.assertNotIn("operation_id", body)
+
+    async def test_run_id_must_be_a_label_value(self) -> None:
+        service = self._service()
+        for bad in ("-abcdef", "abcdef.", "ab c1", "abc"):
+            status_code, _ = await self._deploy(service, run_id=bad)
+            self.assertEqual(status_code, 400, bad)
+        status_code, body = await self._deploy(service, run_id=RUN_ID)
+        self.assertEqual(status_code, 200)
+        self.assertIn("operation_id", body)
+
+    async def test_deployed_name_too_long_for_kubernetes(self) -> None:
+        service = self._service()
+        # bentloy-model- (14 chars) + 49-char slug = 63: accepted.
+        status_code, body = await self._deploy(service, deployed_name="a" * 49)
+        self.assertEqual(status_code, 200, body)
+        self.assertLessEqual(len(body["k8s_job"]), 63)
+        self.assertTrue(body["k8s_job"].startswith("bentloy-build-"))
+        status_code, body = await self._deploy(service, deployed_name="a" * 50)
+        self.assertEqual(status_code, 400)
+        self.assertIn("deployed_name too long", body["detail"])
+
+    async def test_disabled_deploy_answers_403(self) -> None:
+        service = self._service()
+        service.deploy_handler.auto_deploy_enabled = False
+        status_code, body = await self._deploy(service)
+        self.assertEqual(status_code, 403)
+        self.assertIn("disabled", body["detail"])
+
+    async def test_default_images_with_and_without_namespace(self) -> None:
+        cases = {
+            "api-models": (
+                "reg.example.com/api-models/model-tiny-demo-model:",
+                "reg.example.com/api-models/model-service-base:py312",
+            ),
+            "": ("reg.example.com/model-tiny-demo-model:", "reg.example.com/model-service-base:py312"),
+        }
+        for namespace, (target_prefix, base_image) in cases.items():
+            with self.subTest(namespace=namespace):
+                service = self._service()
+                handler = service.deploy_handler
+                handler.model_base_image = ""
+                handler.registry_server = "reg.example.com"
+                handler.registry_namespace = namespace
+                ctx = _FakeContext()
+                body = await service.deploy_model(
+                    ctx=ctx, model_name="tiny_demo_model", tracking_uri="http://mlflow:5000"
+                )
+                self.assertEqual(ctx.response.status_code, 200, body)
+                self.assertTrue(body["image_ref"].startswith(target_prefix), body["image_ref"])
+                operation = await service.operation_store.get(body["operation_id"])
+                self.assertEqual(operation["request"]["base_image"], base_image)
+
+    async def test_gateway_misconfiguration_answers_500(self) -> None:
+        service = self._service()
+        service.deploy_handler.model_base_image = ""
+        service.deploy_handler.registry_server = ""
+        service.deploy_handler.registry_namespace = ""
+        status_code, body = await self._deploy(service)
+        self.assertEqual(status_code, 500)
+        self.assertIn("MODEL_BASE_IMAGE", body["detail"])
 
 
 if __name__ == "__main__":

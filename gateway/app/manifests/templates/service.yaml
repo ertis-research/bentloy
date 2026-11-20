@@ -7,6 +7,8 @@ metadata:
   labels:
     app: model-service
     model-slug: placeholder
+    # Set by the builder: bentloy.io/run-id, bentloy.io/experiment
+  annotations: {}  # Set by the builder: bentloy.io/model-uri, bentloy.io/experiment-name
 spec:
   type: ClusterIP
   selector:

@@ -1,0 +1,129 @@
+# Gateway stack: ServiceAccount + RBAC + ConfigMap + Deployment + Service.
+#
+# Rendered by `python bentloy.py up` (Python string.Template placeholders).
+# Every placeholder maps 1:1 to a future Helm value (see k8s/README.md), so porting
+# to a chart is a mechanical placeholder -> `{{ .Values.<key> }}` replacement.
+# String values are injected already quoted.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bentloy-gateway-sa
+  namespace: ${namespace}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  # Lets the gateway discover model services and run build/deploy operations.
+  name: bentloy-gateway
+  namespace: ${namespace}
+rules:
+  - apiGroups: [""]
+    resources: ["services", "pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bentloy-gateway
+  namespace: ${namespace}
+subjects:
+  - kind: ServiceAccount
+    name: bentloy-gateway-sa
+    namespace: ${namespace}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: bentloy-gateway
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bentloy-gateway-config
+  namespace: ${namespace}
+data:
+  K8S_NAMESPACE: ${namespace}
+  MODEL_SERVICE_PREFIX: ${model_service_prefix}
+  MODEL_URL_TEMPLATE: ${model_url_template}
+  MLFLOW_TRACKING_URI: ${mlflow_tracking_uri}
+  REGISTRY_SERVER: ${registry_server}
+  REGISTRY_NAMESPACE: ${registry_namespace}
+  MODEL_BASE_IMAGE: ${model_base_image}
+  MODEL_REGISTRY_SECRET: ${registry_secret}
+  KANIKO_IMAGE: ${kaniko_image}
+  KANIKO_SKIP_TLS_VERIFY: ${kaniko_skip_tls_verify}
+  KANIKO_CACHE: ${kaniko_cache}
+  MODEL_PIP_EXTRA_INDEX_URL: ${model_pip_extra_index_url}
+  AUTO_DEPLOY_ENABLED: ${auto_deploy_enabled}
+  DEPLOY_BUILD_TIMEOUT_SEC: ${deploy_build_timeout_sec}
+  DEPLOY_ROLLOUT_TIMEOUT_SEC: ${deploy_rollout_timeout_sec}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bentloy-gateway
+  namespace: ${namespace}
+  labels:
+    app: bentloy-gateway
+spec:
+  replicas: ${gateway_replicas}
+  selector:
+    matchLabels:
+      app: bentloy-gateway
+  template:
+    metadata:
+      labels:
+        app: bentloy-gateway
+      annotations:
+        # Restarts the pods when the ConfigMap changes (same pattern as Helm charts).
+        checksum/config: ${config_checksum}
+    spec:
+      serviceAccountName: bentloy-gateway-sa
+      imagePullSecrets:
+        - name: ${registry_secret}
+      containers:
+        - name: bentloy-gateway
+          image: ${gateway_image}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: bentloy-gateway-config
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bentloy-gateway
+  namespace: ${namespace}
+  labels:
+    app: bentloy-gateway
+spec:
+  type: ${gateway_service_type}
+  selector:
+    app: bentloy-gateway
+  ports:
+    - name: http
+      port: ${gateway_port}
+      targetPort: 3000

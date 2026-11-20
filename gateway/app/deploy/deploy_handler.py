@@ -10,14 +10,26 @@ import httpx
 from urllib.parse import quote_plus
 
 from ..domain.helpers import (
+    image_repository,
     is_valid_image_ref,
     is_valid_k8s_name,
+    is_valid_label_value,
     is_valid_registry_server,
     to_model_slug,
 )
 from ..domain.types import DeployOperationRecord, DeployOperationRequest
+from .errors import MAX_ERROR_CHARS, truncate
 from .operation_store import DeployOperationStore
 from .orchestrator import DeployOrchestrator
+
+
+class DeployRequestError(Exception):
+    """A deploy request that cannot be queued; carries the HTTP status to answer with."""
+
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
 
 
 class DeployHandler:
@@ -31,24 +43,26 @@ class DeployHandler:
         default_tracking_uri: str,
         kaniko_skip_tls_verify_default: bool,
         registry_server: str,
-        registry_org: str,
+        registry_namespace: str,
         model_base_image: str,
         registry_secret: str,
         operation_store: DeployOperationStore,
         deploy_orchestrator: DeployOrchestrator,
         now_iso: Callable[[], str],
+        model_service_prefix: str = "bentloy-model",
     ):
         self.auto_deploy_enabled = auto_deploy_enabled
         self.model_namespace = model_namespace
         self.default_tracking_uri = default_tracking_uri
         self.kaniko_skip_tls_verify_default = kaniko_skip_tls_verify_default
         self.registry_server = registry_server
-        self.registry_org = registry_org
+        self.registry_namespace = registry_namespace
         self.model_base_image = model_base_image
         self.registry_secret = registry_secret
         self.operation_store = operation_store
         self.deploy_orchestrator = deploy_orchestrator
         self.now_iso = now_iso
+        self.model_service_prefix = model_service_prefix
 
     def _build_operation_id(self) -> str:
         """Generate a sortable operation id with timestamp and random suffix."""
@@ -63,7 +77,7 @@ class DeployHandler:
         model_version: str,
         run_id: str,
         registry_server: str,
-        org: str,
+        namespace: str,
     ) -> str:
         """Build a deterministic target image reference for the model artifact."""
 
@@ -77,7 +91,7 @@ class DeployHandler:
             now_utc = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
             tag = f"v{model_version_slug}-t{now_utc}"
 
-        return f"{registry_server}/{org}/model-{model_slug}:{tag}"
+        return f"{image_repository(registry_server, namespace, f'model-{model_slug}')}:{tag}"
 
     async def deploy_model(
         self,
@@ -92,11 +106,17 @@ class DeployHandler:
         insecure_registry_tls: bool = False,
         deployed_name: str = "",
         append_date: bool = False,
+        experiment_name: str = "",
     ) -> dict[str, Any]:
-        """Validate input, enqueue a deploy operation, and trigger async execution."""
+        """Validate input, enqueue a deploy operation, and trigger async execution.
+
+        `model_name` is the base name of the deployment (slug, image, default
+        `deployed_name`); `experiment_name` is the MLflow experiment the run belongs to.
+        Raises DeployRequestError when the request cannot be queued.
+        """
 
         if not self.auto_deploy_enabled:
-            return {"error": "Automatic deploy is disabled on this gateway."}
+            raise DeployRequestError("Automatic deploy is disabled on this gateway.", 403)
 
         namespace = namespace.strip() or self.model_namespace
         model_slug = to_model_slug(model_name)
@@ -106,7 +126,8 @@ class DeployHandler:
             deployed_name = f"{deployed_name}_{datetime.now(timezone.utc).strftime('%Y%m%d')}"
         deployment_slug = to_model_slug(deployed_name)
         model_version = (model_version or "latest").strip()
-        run_id = run_id.strip()
+        run_id = (run_id or "").strip()
+        experiment_name = (experiment_name or "").strip()
         tracking_uri = tracking_uri.strip() or self.default_tracking_uri
         model_uri = model_uri.strip()
         target_image = target_image.strip()
@@ -115,50 +136,59 @@ class DeployHandler:
         )
 
         if not model_slug:
-            return {"error": "Invalid model_name. Could not generate slug."}
+            raise DeployRequestError("Invalid model_name. Could not generate slug.")
         if not deployment_slug:
-            return {"error": "Invalid deployed_name. Could not generate slug."}
+            raise DeployRequestError("Invalid deployed_name. Could not generate slug.")
+        resource_name = f"{self.model_service_prefix}-{deployment_slug}"
+        if len(resource_name) > 63:
+            raise DeployRequestError(
+                f"deployed_name too long: Kubernetes resource '{resource_name}' would exceed "
+                f"63 characters (max {62 - len(self.model_service_prefix)} for the name)."
+            )
         if not is_valid_k8s_name(namespace):
-            return {"error": f"Invalid namespace '{namespace}'."}
+            raise DeployRequestError(f"Invalid namespace '{namespace}'.")
         if replicas < 1:
-            return {"error": "replicas must be >= 1."}
-        if run_id and not re.fullmatch(r"[A-Za-z0-9._-]{4,128}", run_id):
-            return {"error": "Invalid run_id format."}
+            raise DeployRequestError("replicas must be >= 1.")
+        if run_id and (len(run_id) < 4 or not is_valid_label_value(run_id)):
+            raise DeployRequestError(
+                "Invalid run_id format (4-63 chars: letters, digits, '.', '_', '-'; "
+                "must start and end with a letter or digit)."
+            )
         if not tracking_uri and not model_uri:
-            return {"error": "Set tracking_uri or model_uri."}
+            raise DeployRequestError("Set tracking_uri or model_uri.")
 
         registry_server = self.registry_server
-        registry_org = self.registry_org
+        registry_namespace = self.registry_namespace
         if not target_image:
-            if not registry_server or not registry_org:
-                return {
-                    "error": "Missing REGISTRY_SERVER/TU_ORG or pass target_image explicitly."
-                }
+            if not registry_server:
+                raise DeployRequestError(
+                    "Missing REGISTRY_SERVER or pass target_image explicitly.", 500
+                )
             if not is_valid_registry_server(registry_server):
-                return {"error": f"Invalid REGISTRY_SERVER '{registry_server}'."}
+                raise DeployRequestError(f"Invalid REGISTRY_SERVER '{registry_server}'.", 500)
             target_image = self._build_target_image(
                 model_slug=model_slug,
                 model_version=model_version,
                 run_id=run_id,
                 registry_server=registry_server,
-                org=registry_org,
+                namespace=registry_namespace,
             )
 
         if not is_valid_image_ref(target_image):
-            return {"error": f"Invalid target_image '{target_image}'."}
+            raise DeployRequestError(f"Invalid target_image '{target_image}'.")
 
         if self.model_base_image:
             base_image = self.model_base_image
         else:
-            if not registry_server or not registry_org:
-                return {"error": "Missing MODEL_BASE_IMAGE and REGISTRY_SERVER/TU_ORG."}
-            base_image = f"{registry_server}/{registry_org}/model-service-base:py310"
+            if not registry_server:
+                raise DeployRequestError("Missing MODEL_BASE_IMAGE and REGISTRY_SERVER.", 500)
+            base_image = f"{image_repository(registry_server, registry_namespace, 'model-service-base')}:py312"
 
         if not is_valid_image_ref(base_image):
-            return {"error": f"Invalid base image '{base_image}'."}
+            raise DeployRequestError(f"Invalid base image '{base_image}'.", 500)
 
         operation_id = self._build_operation_id()
-        job_name = f"build-model-{deployment_slug}-{operation_id[-6:]}"
+        job_name = f"bentloy-build-{deployment_slug}"[:56].rstrip("-") + f"-{operation_id[-6:]}"
         job_name = re.sub(r"[^a-z0-9-]+", "-", job_name.lower()).strip("-")[:63].rstrip("-")
 
         request: DeployOperationRequest = {
@@ -168,6 +198,8 @@ class DeployHandler:
             "deployed_name": deployed_name,
             "deployment_slug": deployment_slug,
             "model_version": model_version,
+            "run_id": run_id,
+            "experiment_name": experiment_name,
             "model_uri": model_uri,
             "tracking_uri": tracking_uri,
             "replicas": replicas,
@@ -188,11 +220,15 @@ class DeployHandler:
             "model_name": model_name,
             "deployed_name": deployed_name,
             "model_version": model_version,
+            "run_id": run_id,
+            "model_uri": model_uri,
+            "experiment_name": experiment_name,
             "namespace": namespace,
             "replicas": replicas,
             "image_ref": target_image,
             "k8s_job": job_name,
             "error": None,
+            "error_log": None,
             "message": None,
             "request": request,
         }
@@ -205,6 +241,9 @@ class DeployHandler:
             "status": "queued",
             "model_name": model_name,
             "deployed_name": deployed_name,
+            "run_id": run_id or None,
+            "model_uri": model_uri or None,
+            "experiment_name": experiment_name or None,
             "namespace": namespace,
             "image_ref": target_image,
             "k8s_job": job_name,
@@ -224,10 +263,14 @@ class DeployHandler:
             "model_name": operation["model_name"],
             "deployed_name": operation["deployed_name"],
             "model_version": operation["model_version"],
+            "run_id": operation.get("run_id") or None,
+            "model_uri": operation.get("model_uri") or None,
+            "experiment_name": operation.get("experiment_name") or None,
             "namespace": operation["namespace"],
             "image_ref": operation["image_ref"],
             "k8s_job": operation["k8s_job"],
             "error": operation["error"],
+            "error_log": operation.get("error_log"),
             "message": operation["message"],
             "created_at": operation["created_at"],
             "updated_at": operation["updated_at"],
@@ -274,6 +317,12 @@ class DeployHandler:
         image_ref = operation.get("image_ref")
         build_job_name = operation.get("k8s_job")
         namespace = operation.get("namespace", self.model_namespace)
+        # Reuse the settings the operation was built with (falls back to gateway defaults).
+        request = operation.get("request") or {}
+        registry_secret = request.get("registry_secret") or registry_secret
+        insecure_registry_tls = bool(
+            request.get("insecure_registry_tls", self.kaniko_skip_tls_verify_default)
+        )
 
         try:
             # 1. Delete Kubernetes Resources ONLY if we have a name
@@ -285,7 +334,13 @@ class DeployHandler:
             # 2. Delete Registry Image
             try:
                 if image_ref:
-                    await self.deploy_orchestrator._delete_registry_image(image_ref, namespace, deployed_name, registry_secret)
+                    await self.deploy_orchestrator._delete_registry_image(
+                        image_ref,
+                        namespace,
+                        deployed_name,
+                        registry_secret,
+                        insecure_registry_tls=insecure_registry_tls,
+                    )
             except Exception as img_err:
                 print(f"Image not deleted: {img_err}")
                 
@@ -299,11 +354,12 @@ class DeployHandler:
             
             # Save a better error string
             error_msg = f"{type(e).__name__}: {str(e)}"
-            
+
             await operation_store.update(
-                operation_id, 
-                status="delete_failed", 
-                error=error_msg
+                operation_id,
+                status="delete_failed",
+                error=truncate(error_msg),
+                error_log=error_msg if len(error_msg) > MAX_ERROR_CHARS else None,
             )
 
     async def delete_model(self, service_name: str):

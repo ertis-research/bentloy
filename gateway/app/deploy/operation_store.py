@@ -48,8 +48,16 @@ class DeployOperationStore:
             operation.update(changes)
             operation["updated_at"] = self._now_iso()
 
-    async def list_summaries(self, limit: int = 20) -> list[dict[str, str]]:
-        """Return recent operation summaries sorted by most recent update."""
+    async def list_summaries(
+        self,
+        limit: int = 20,
+        experiment_name: str = "",
+        run_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """Return recent operation summaries sorted by most recent update.
+
+        Non-empty `experiment_name` / `run_id` keep only exact matches.
+        """
 
         async with self._lock:
             summaries = [
@@ -60,9 +68,14 @@ class DeployOperationStore:
                     "deployed_name": operation["deployed_name"],
                     "image_ref": operation["image_ref"],
                     "updated_at": operation["updated_at"],
-                    "error": operation.get("error")
+                    "error": operation.get("error"),
+                    "run_id": operation.get("run_id") or None,
+                    "model_uri": operation.get("model_uri") or None,
+                    "experiment_name": operation.get("experiment_name") or None,
                 }
                 for operation in self._operations.values()
+                if (not experiment_name or operation.get("experiment_name") == experiment_name)
+                and (not run_id or operation.get("run_id") == run_id)
             ]
 
         summaries.sort(key=lambda item: item["updated_at"], reverse=True)

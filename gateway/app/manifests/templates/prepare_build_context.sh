@@ -1,6 +1,6 @@
 # Prepare a model build context for Kaniko using MLflow artifacts.
 set -euo pipefail
-python -m pip install --no-cache-dir mlflow==3.17.2 'PyYAML>=6.0' 'pyarrow<24'
+python -m pip install --no-cache-dir mlflow-skinny==3.17.2
 python - <<'PY'
 import json
 import os
@@ -97,7 +97,7 @@ def load_requirements() -> list[str]:
     return collected
 
 
-base_packages = {"bentoml", "mlflow", "numpy", "pandas"}
+base_packages = {"bentoml", "mlflow", "mlflow-skinny", "numpy", "pandas"}
 filtered_requirements: list[str] = []
 seen_packages: set[str] = set()
 
@@ -122,10 +122,14 @@ dockerfile_content = textwrap.dedent(
     """\
     ARG BASE_IMAGE
     FROM ${BASE_IMAGE}
+    # Extra pip index (default: PyTorch CPU wheels, so torch does not pull GBs of CUDA libs).
+    ARG MODEL_PIP_EXTRA_INDEX_URL=""
     WORKDIR /app
-    COPY model /models/model
+    # Dependencies before the model: this layer only depends on the requirements,
+    # so Kaniko's cache reuses it for every model/version with the same requirements.
     COPY extra_requirements.txt /tmp/extra_requirements.txt
-    RUN if [ -s /tmp/extra_requirements.txt ]; then pip freeze > /tmp/base_constraints.txt && pip install --default-timeout=1000 --retries=10 --no-cache-dir -c /tmp/base_constraints.txt -r /tmp/extra_requirements.txt; fi
+    RUN if [ -s /tmp/extra_requirements.txt ]; then pip freeze > /tmp/base_constraints.txt && pip install --default-timeout=1000 --retries=10 --no-cache-dir ${MODEL_PIP_EXTRA_INDEX_URL:+--extra-index-url "$MODEL_PIP_EXTRA_INDEX_URL"} -c /tmp/base_constraints.txt -r /tmp/extra_requirements.txt; fi
+    COPY model /models/model
     ENV MODEL_URI=/models/model
     """
 )

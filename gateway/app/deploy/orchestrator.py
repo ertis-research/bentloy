@@ -11,6 +11,13 @@ import httpx
 
 from ..domain.types import DeployOperationRequest
 from ..kubernetes.client import KubernetesApiClient
+from .errors import (
+    MAX_ERROR_CHARS,
+    DeployStepError,
+    build_failure,
+    extract_failure_reason,
+    truncate,
+)
 from .operation_store import DeployOperationStore
 
 
@@ -37,6 +44,8 @@ class DeployOrchestrator:
         build_timeout_sec: int,
         rollout_timeout_sec: int,
         http_client_factory: Callable[[str | bool], httpx.AsyncClient] | None = None,
+        registry_secret: str = "bentloy-registry-creds",
+        insecure_registry_tls_default: bool = False,
     ):
         self.operation_store = operation_store
         self.k8s_client = k8s_client
@@ -50,6 +59,8 @@ class DeployOrchestrator:
         self.build_timeout_sec = build_timeout_sec
         self.rollout_timeout_sec = rollout_timeout_sec
         self.http_client_factory = http_client_factory or _default_http_client_factory
+        self.registry_secret = registry_secret
+        self.insecure_registry_tls_default = insecure_registry_tls_default
 
     async def run_operation(self, operation_id: str) -> None:
         """Execute one queued deployment operation end-to-end."""
@@ -65,6 +76,8 @@ class DeployOrchestrator:
             deployment_slug = payload["deployment_slug"]
             model_version = payload["model_version"]
             model_uri = payload["model_uri"]
+            run_id = payload.get("run_id", "")
+            experiment_name = payload.get("experiment_name", "")
             tracking_uri = payload["tracking_uri"]
             replicas = payload["replicas"]
             target_image = payload["target_image"]
@@ -102,8 +115,12 @@ class DeployOrchestrator:
             async with self.http_client_factory(verify) as client:
                 create_response = await client.post(jobs_url, headers=headers, json=job_manifest)
                 if create_response.status_code not in {200, 201, 202}:
-                    raise RuntimeError(
-                        f"Job creation failed ({create_response.status_code}): {create_response.text}"
+                    raise DeployStepError(
+                        truncate(
+                            f"Job creation failed ({create_response.status_code}): "
+                            f"{extract_failure_reason(create_response.text)}"
+                        ),
+                        log=create_response.text,
                     )
 
                 start = asyncio.get_running_loop().time()
@@ -135,10 +152,11 @@ class DeployOrchestrator:
                             job_name=job_name,
                             container="kaniko",
                         )
-                        raise RuntimeError(
-                            "Build Job failed.\n\n"
-                            f"[prepare-build-context]\n{prepare_logs}\n\n"
-                            f"[kaniko]\n{kaniko_logs}"
+                        raise build_failure(
+                            prepare_logs=prepare_logs,
+                            kaniko_logs=kaniko_logs,
+                            target_image=target_image,
+                            registry_secret=registry_secret,
                         )
 
                     if succeeded > 0:
@@ -180,11 +198,17 @@ class DeployOrchestrator:
                     model_version="image",
                     registry_secret=registry_secret,
                     model_service_prefix=self.model_service_prefix,
+                    run_id=run_id,
+                    source_model_uri=model_uri,
+                    experiment_name=experiment_name,
                 )
                 service_manifest = self.build_service_manifest(
-                    namespace,
-                    deployment_slug,
-                    self.model_service_prefix,
+                    namespace=namespace,
+                    model_slug=deployment_slug,
+                    model_service_prefix=self.model_service_prefix,
+                    run_id=run_id,
+                    source_model_uri=model_uri,
+                    experiment_name=experiment_name,
                 )
 
                 deploy_name = f"{self.model_service_prefix}-{deployment_slug}"
@@ -225,12 +249,22 @@ class DeployOrchestrator:
                 message="Deployment completed successfully.",
             )
 
-        except Exception as exc:
+        except DeployStepError as exc:
             await self.operation_store.update(
                 operation_id,
                 status="failed",
                 step="failed",
-                error=str(exc),
+                error=exc.message,
+                error_log=exc.log,
+            )
+        except Exception as exc:
+            message = str(exc) or type(exc).__name__
+            await self.operation_store.update(
+                operation_id,
+                status="failed",
+                step="failed",
+                error=truncate(message),
+                error_log=message if len(message) > MAX_ERROR_CHARS else None,
             )
 
     async def _delete_k8s_resources(self, deployed_name: str, job_name:str | None, namespace: str) -> None:
@@ -361,7 +395,8 @@ class DeployOrchestrator:
         
         # Generate a safe, short job name
         job_hash = str(hash(image_ref))[-6:]
-        job_name = f"delete-img-{deployment_slug}-{job_hash}"[:63] # K8s limits names to 63 chars
+        # K8s limits names to 63 chars
+        job_name = f"bentloy-delete-img-{deployment_slug}"[:56].rstrip("-") + f"-{job_hash}"
 
         job_manifest = self.build_delete_job_manifest(
             job_name=job_name,
@@ -425,11 +460,13 @@ class DeployOrchestrator:
         # namespace = getattr(self, "model_namespace", "default")
                 
         # Derive the deployment slug for the crane job name
-        prefix = f"{getattr(self, 'model_service_prefix', 'model')}-"
+        prefix = f"{self.model_service_prefix}-"
         deployment_slug = service_name.replace(prefix, "") if service_name.startswith(prefix) else service_name
 
         image_ref = None
-        registry_secret = "default-registry-secret" # Fallback if none is found
+        # Always use the gateway's configured MODEL_REGISTRY_SECRET to delete the image: the
+        # Deployment's pull secret may be stale or point to another registry project.
+        registry_secret = self.registry_secret
         
         try:
             config.load_incluster_config()
@@ -449,10 +486,6 @@ class DeployOrchestrator:
                 if deployment.spec.template.spec.containers:
                     image_ref = deployment.spec.template.spec.containers[0].image
                 
-                # Extract the registry secret
-                if deployment.spec.template.spec.image_pull_secrets:
-                    registry_secret = deployment.spec.template.spec.image_pull_secrets[0].name
-
             except ApiException as e:
                 if e.status == 404:
                     print(f"Deployment {service_name} not found. Proceeding with cleanup anyway.")
@@ -489,7 +522,7 @@ class DeployOrchestrator:
                     namespace=namespace,
                     deployment_slug=deployment_slug,
                     registry_secret=registry_secret,
-                    insecure_registry_tls=getattr(self, "insecure_registry_tls", False) 
+                    insecure_registry_tls=self.insecure_registry_tls_default,
                 )
             except Exception as img_err:
                 print(f"Failed to delete registry image: {img_err}")

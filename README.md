@@ -1,4 +1,4 @@
-# NITRATE Model Serving
+# Bentloy Model Serving
 
 Production-oriented API gateway and model-serving stack on Kubernetes, using MLflow + BentoML.
 
@@ -7,7 +7,7 @@ Production-oriented API gateway and model-serving stack on Kubernetes, using MLf
 This project serves MLflow models through:
 
 1. A `gateway` API that receives `/predict` and deployment requests.
-2. One model service per model (`model-<slug>`), deployed as independent Kubernetes workloads.
+2. One model service per model (`bentloy-model-<slug>`), deployed as independent Kubernetes workloads.
 3. An asynchronous image-build pipeline (Kaniko Job) for image-per-model deployments.
 
 ## Architecture
@@ -26,53 +26,67 @@ flowchart LR
 
 ## Quick Start
 
-### 1) Configure environment
+Requirements: Python 3.12, `docker` and `kubectl` pointing to the target cluster.
 
-Copy `.env_example` to `.env` and set at least:
+### 1) Configure
 
-1. `MLFLOW_TRACKING_URI`
-2. `REGISTRY_SERVER`
-3. `TU_ORG`
-4. `REGISTRY_USERNAME` / `REGISTRY_PASSWORD`
-5. `K8S_NAMESPACE` (default: `api-models`)
+Copy `.env_example` to `.env` and fill in the required block:
+`MLFLOW_TRACKING_URI`, `REGISTRY_SERVER`, `REGISTRY_USERNAME`,
+`REGISTRY_PASSWORD` and `K8S_NAMESPACE` (default: `default`).
+`REGISTRY_NAMESPACE` is optional (project/org inside the registry); images are
+`<REGISTRY_SERVER>[/<REGISTRY_NAMESPACE>]/<image>`.
 
-### 2) Build and push shared images (`gateway`, `model_service`)
+Docker Desktop (or the Docker engine) must be running to build the images.
 
-PowerShell:
-
-```powershell
-.\k8s\build_images.ps1 -Tag 20260416-01 -RegistryPrefix <REGISTRY_SERVER>/<TU_ORG>
-```
-
-Bash:
+### 2) Deploy the gateway
 
 ```bash
-./k8s/build_images.sh 20260416-01 <REGISTRY_SERVER>/<TU_ORG>
+python bentloy.py up
 ```
 
-### 3) Deploy gateway (YAML)
+One idempotent command that:
 
-PowerShell:
+1. Builds and pushes the `gateway` and `model_service` base images, only if they
+   are not in the registry yet (tags are a hash of their sources, so unchanged
+   code is never rebuilt).
+2. Creates the namespace and the registry pull secret.
+3. Renders `k8s/templates/gateway.yaml` from `.env`, applies it and waits for the rollout.
 
-```powershell
-kubectl apply -f .\k8s\yaml\gateway.yaml
-kubectl -n api-models rollout status deploy/gateway --timeout=180s
-```
+Run it again after any code or `.env` change. `python bentloy.py up --dry-run`
+shows the plan and the rendered manifests without touching anything.
 
-Bash:
+### 3) Deploy a model
 
 ```bash
-kubectl apply -f ./k8s/yaml/gateway.yaml
-kubectl -n api-models rollout status deploy/gateway --timeout=180s
+python bentloy.py deploy tiny_demo_model                 # latest version
+python bentloy.py deploy tiny_demo_model --version 3 --name tiny_demo_prod
 ```
 
-### 4) Deploy one model image (image-per-model flow)
+The gateway builds a dedicated image for the model (Kaniko Job in the cluster) and
+deploys it; the command waits and prints the progress. Other commands:
 
-PowerShell:
+```bash
+python bentloy.py models                         # list models
+python bentloy.py predict tiny_demo_prod x1=5 x2=2 x3=3   # prediction
+python bentloy.py status <operation_id>          # deploy status
+python bentloy.py delete tiny_demo_prod          # delete Deployment, Service and image
+```
 
-```powershell
-.\k8s\build_model_image_job.ps1 -ModelName tiny_demo_model -ModelVersion latest -Namespace api-models -Wait -InsecureRegistryTls
-.\k8s\deploy_model_image.ps1 -ModelName tiny_demo_model -ModelImage <REGISTRY_SERVER>/<TU_ORG>/model-tiny-demo-model:<tag> -Namespace api-models -Replicas 1
+`predict` accepts `column=value` pairs, a JSON object of columns
+(`'{"x1": 5, "x2": 2}'`), a JSON list of features in the model's column order
+(`'[5, 2, 3]'`) or `--file input.json`.
+
+These commands reach the gateway through `kubectl port-forward` automatically, or
+through `GATEWAY_URL` if you set it in `.env`.
+
+### Local development
+
+```bash
+py -3.12 -m venv .venv            # Linux/macOS: python3.12 -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+python -m unittest discover -s gateway/tests -t .
+python -m unittest discover -s model_service/tests -t .
+python -m unittest discover -s tests -t .
 ```
 
 ## Common API calls
@@ -106,7 +120,6 @@ curl -X POST "<gateway_url>/deploy_model" \
   -d '{
     "model_name": "tiny_demo_model_2",
     "model_version": "latest",
-    "namespace": "api-models",
     "replicas": 1,
     "deployed_name": "tiny_demo_model_2_prod",
     "append_date": true
@@ -119,24 +132,15 @@ Use `deployed_name` as the `model_name` value in `/predict` when custom naming i
 
 | Path | Purpose |
 |---|---|
+| `bentloy.py` | CLI: build images, deploy the gateway, deploy/list/delete models |
 | `gateway/` | API gateway service and deploy orchestration |
-| `model_service/` | Generic BentoML model runtime |
-| `k8s/` | Build/deploy scripts (`.sh`, `.ps1`) |
-| `k8s/bootstrap/` | One-time bootstrap scripts (secret + base image) |
-| `k8s/yaml/` | Canonical gateway and template manifests |
-| `examples/rest/` | Example request payloads |
-| `docs/` | Runbook, technical docs, phases/history |
-
-## Build behavior notes
-
-`k8s/build_images.*` is now Dockerfile-only for shared images (`gateway`, `model_service`).
-
-If `gateway/` and `model_service/` code/dependencies did not change, you can reuse existing published tags and skip rebuilding.
+| `model_service/` | BentoML model runtime (base image for per-model images) |
+| `k8s/templates/` | Gateway and registry-secret manifests rendered by `bentloy.py` (see `k8s/README.md`) |
+| `tests/` | Tests for `bentloy.py` |
+| `docs/` | Runbook and gateway technical docs |
 
 ## Documentation
 
-1. Main runbook: `docs/runbook.md`
+1. Runbook (operations, troubleshooting): `docs/runbook.md`
 2. Gateway technical details: `docs/gateway_technical.md`
-3. K8s script function reference: `docs/k8s_scripts_function_reference.md`
-4. Phase docs: `docs/phases/`
-5. Historical notes: `docs/history/`
+3. Kubernetes templates and future Helm mapping: `k8s/README.md`

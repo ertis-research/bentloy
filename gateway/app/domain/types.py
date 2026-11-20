@@ -12,6 +12,8 @@ class DeployOperationRequest(TypedDict):
     deployed_name: str
     deployment_slug: str
     model_version: str
+    run_id: str
+    experiment_name: str
     model_uri: str
     tracking_uri: str
     replicas: int
@@ -34,10 +36,14 @@ class DeployOperationRecord(TypedDict):
     model_name: str
     deployed_name: str
     model_version: str
+    run_id: str
+    model_uri: str
+    experiment_name: str
     namespace: str
     replicas: int
     image_ref: str
     k8s_job: str
     error: str | None
+    error_log: str | None
     message: str | None
     request: DeployOperationRequest

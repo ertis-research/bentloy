@@ -133,13 +133,189 @@ class InfoHandlerTest(unittest.IsolatedAsyncioTestCase):
             return [], "simulated discovery error"
 
         handler.discover_k8s_model_services = fake_discovery_error  # type: ignore[method-assign]
-        result = await handler.list_models()
+        result = await handler.list_models(page=0, page_size=10, query="")
 
         self.assertEqual(result["discovery"]["status"], "error")
         self.assertEqual(result["discovery"]["error"], "simulated discovery error")
         self.assertEqual(result["configured_models"], ["a"])
         self.assertEqual(result["recently_routed_models"], ["z"])
         self.assertEqual(len(result["deploy_operations"]), 1)
+        self.assertEqual(result["pagination"]["configured_models"]["total_items"], 1)
+        self.assertFalse(result["pagination"]["configured_models"]["has_next"])
+
+        filtered = await handler.list_models(page=0, page_size=10, query="zz")
+        self.assertEqual(filtered["configured_models"], [])
+        self.assertEqual(filtered["recently_routed_models"], [])
+
+        second_page = await handler.list_models(page=1, page_size=1, query="")
+        self.assertEqual(second_page["configured_models"], [])
+        self.assertTrue(second_page["pagination"]["configured_models"]["has_previous"])
+
+    async def test_list_models_filters_by_experiment_and_run(self) -> None:
+        run_a1, run_a2, run_b = "a1" * 16, "a2" * 16, "b1" * 16
+
+        def service(name: str, run_id, experiment) -> dict:
+            return {
+                "service_name": f"model-{name}",
+                "model_slug": name,
+                "inferred_model_name": name.replace("-", "_"),
+                "base_url": f"http://model-{name}:3000",
+                "predict_endpoint": f"http://model-{name}:3000/predict",
+                "run_id": run_id,
+                "model_uri": f"runs:/{run_id}/ludwig-model" if run_id else None,
+                "experiment_name": experiment,
+            }
+
+        services = [
+            service("churn-v1", run_a1, "Churn"),
+            service("churn-v2", run_a2, "Churn"),
+            service("churn-eu", run_b, "Churn EU"),
+            service("legacy", None, None),
+        ]
+
+        store = DeployOperationStore(now_iso=lambda: "2026-04-15T12:00:00+00:00")
+        for op_id, run_id, experiment in (
+            ("op_a1", run_a1, "Churn"),
+            ("op_a2", run_a2, "Churn"),
+            ("op_b", run_b, "Churn EU"),
+        ):
+            await store.add(
+                {  # type: ignore[typeddict-item]
+                    "operation_id": op_id,
+                    "status": "ready",
+                    "updated_at": f"2026-04-15T12:00:0{len(op_id)}+00:00",
+                    "model_name": op_id,
+                    "deployed_name": op_id,
+                    "image_ref": "registry/org/img:tag",
+                    "run_id": run_id,
+                    "model_uri": f"runs:/{run_id}/ludwig-model",
+                    "experiment_name": experiment,
+                }
+            )
+
+        handler = InfoHandler(
+            model_urls={"a": "http://model-a:3000"},
+            model_service_prefix="model",
+            model_namespace="api-models",
+            model_url_template="http://{service_name}:3000",
+            recently_routed_models={"z": "http://model-z:3000"},
+            model_discovery=_FakeDiscovery(),
+            operation_store=store,
+            resolve_k8s_auth=lambda: ("https://k8s", {}, False),
+        )
+
+        async def fake_discovery():
+            return services, None
+
+        handler.discover_k8s_model_services = fake_discovery  # type: ignore[method-assign]
+
+        # No filter: everything, as before.
+        result = await handler.list_models(page=0, page_size=10, query="")
+        self.assertEqual(len(result["discovered_models"]), 4)
+        self.assertEqual(len(result["deploy_operations"]), 3)
+        self.assertEqual(result["configured_models"], ["a"])
+
+        # Exact experiment filter: "Churn" does not match "Churn EU".
+        result = await handler.list_models(page=0, page_size=10, query="", experiment_name="Churn")
+        self.assertEqual(
+            [svc["service_name"] for svc in result["discovered_models"]],
+            ["model-churn-v1", "model-churn-v2"],
+        )
+        self.assertEqual(
+            sorted(op["operation_id"] for op in result["deploy_operations"]), ["op_a1", "op_a2"]
+        )
+        self.assertEqual(result["configured_models"], [])
+        self.assertEqual(result["recently_routed_models"], [])
+        self.assertEqual(
+            sorted(result["endpoints"]), ["churn_v1", "churn_v2"]
+        )
+        self.assertEqual(result["pagination"]["discovered_models"]["total_items"], 2)
+
+        # Pagination applies to the filtered result.
+        page_1 = await handler.list_models(page=1, page_size=1, query="", experiment_name="Churn")
+        self.assertEqual(
+            [svc["service_name"] for svc in page_1["discovered_models"]], ["model-churn-v2"]
+        )
+        self.assertFalse(page_1["pagination"]["discovered_models"]["has_next"])
+
+        # Run filter (one version), combinable with the experiment filter.
+        result = await handler.list_models(page=0, page_size=10, query="", run_id=run_a2)
+        self.assertEqual(
+            [svc["service_name"] for svc in result["discovered_models"]], ["model-churn-v2"]
+        )
+        self.assertEqual([op["operation_id"] for op in result["deploy_operations"]], ["op_a2"])
+        result = await handler.list_models(
+            page=0, page_size=10, query="", experiment_name="Churn EU", run_id=run_a2
+        )
+        self.assertEqual(result["discovered_models"], [])
+        self.assertEqual(result["deploy_operations"], [])
+
+    async def test_query_filters_deploy_operations_by_deployed_name(self) -> None:
+        store = DeployOperationStore(now_iso=lambda: "2026-04-15T12:00:00+00:00")
+        for op_id, deployed_name in (("op_1", "E2E_QA"), ("op_2", "e2e_qb"), ("op_3", "churn")):
+            await store.add(
+                {  # type: ignore[typeddict-item]
+                    "operation_id": op_id,
+                    "status": "ready",
+                    "updated_at": "2026-04-15T12:00:00+00:00",
+                    "model_name": "base_model",
+                    "deployed_name": deployed_name,
+                    "image_ref": "registry/org/img:tag",
+                }
+            )
+        handler = InfoHandler(
+            model_urls={},
+            model_service_prefix="model",
+            model_namespace="api-models",
+            model_url_template="http://{service_name}:3000",
+            recently_routed_models={},
+            model_discovery=_FakeDiscovery(),
+            operation_store=store,
+            resolve_k8s_auth=lambda: ("https://k8s", {}, False),
+        )
+
+        async def no_services():
+            return [], None
+
+        handler.discover_k8s_model_services = no_services  # type: ignore[method-assign]
+
+        result = await handler.list_models(page=0, page_size=10, query="e2e_q")
+        self.assertEqual(
+            sorted(op["operation_id"] for op in result["deploy_operations"]), ["op_1", "op_2"]
+        )
+        self.assertEqual(result["pagination"]["deploy_operations"]["total_items"], 2)
+        result = await handler.list_models(page=0, page_size=10, query="e2e_qa")
+        self.assertEqual([op["operation_id"] for op in result["deploy_operations"]], ["op_1"])
+        result = await handler.list_models(page=0, page_size=10, query="")
+        self.assertEqual(len(result["deploy_operations"]), 3)
+
+    async def test_out_of_range_page_metadata(self) -> None:
+        handler = InfoHandler(
+            model_urls={"a": "http://model-a:3000"},
+            model_service_prefix="model",
+            model_namespace="api-models",
+            model_url_template="http://{service_name}:3000",
+            recently_routed_models={},
+            model_discovery=_FakeDiscovery(),
+            operation_store=DeployOperationStore(),
+            resolve_k8s_auth=lambda: ("https://k8s", {}, False),
+        )
+
+        async def no_services():
+            return [], None
+
+        handler.discover_k8s_model_services = no_services  # type: ignore[method-assign]
+
+        result = await handler.list_models(page=1, page_size=1, query="")
+        pagination = result["pagination"]
+        # Out of range for a list with data: empty slice, previous page exists, no next.
+        self.assertEqual(result["configured_models"], [])
+        self.assertTrue(pagination["configured_models"]["has_previous"])
+        self.assertFalse(pagination["configured_models"]["has_next"])
+        # Empty lists never report a previous page.
+        for key in ("recently_routed_models", "discovered_models", "deploy_operations"):
+            self.assertFalse(pagination[key]["has_previous"], key)
+            self.assertFalse(pagination[key]["has_next"], key)
 
 
 if __name__ == "__main__":

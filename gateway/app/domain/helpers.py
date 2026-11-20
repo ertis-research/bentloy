@@ -30,6 +30,13 @@ def positive_int_from_env(env: Mapping[str, str], key: str, default: int) -> int
     return value if value > 0 else default
 
 
+def image_repository(registry_server: str, namespace: str, repository: str) -> str:
+    """Join registry host, optional namespace and repository (`host[/namespace]/repo`)."""
+
+    parts = [registry_server.strip().strip("/"), namespace.strip().strip("/"), repository.strip("/")]
+    return "/".join(part for part in parts if part)
+
+
 def normalize_registry_server(value: str) -> str:
     """Normalize a registry server input to host[:port] format."""
 
@@ -68,6 +75,21 @@ def to_model_slug(model_name: str) -> str:
     slug = re.sub(r"[^a-z0-9-]", "-", slug)
     slug = re.sub(r"-+", "-", slug).strip("-")
     return slug
+
+
+_LABEL_VALUE_RE = re.compile(r"([A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?)?")
+
+
+def is_valid_label_value(value: str) -> bool:
+    """Return whether the value is a valid Kubernetes label value (empty allowed)."""
+
+    return bool(_LABEL_VALUE_RE.fullmatch(value))
+
+
+def to_label_value(value: str) -> str:
+    """Convert free text into a valid Kubernetes label value (slug, max 63 chars)."""
+
+    return to_model_slug(value)[:63].strip("-")
 
 
 def slug_to_model_name(model_slug: str) -> str:

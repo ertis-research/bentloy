@@ -18,7 +18,8 @@ class ModelServiceRuntimeTest(unittest.TestCase):
             "from_env",
             return_value=settings,
         ):
-            with self.assertRaises(ValueError):
+            # BentoML logs the traceback of a failing __init__; capture it to keep output clean.
+            with self.assertLogs(level="ERROR"), self.assertRaises(ValueError):
                 service_module.MLflowModelService()
 
     def test_init_loads_model_and_sets_runtime_state(self) -> None:

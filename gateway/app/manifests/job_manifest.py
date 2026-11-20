@@ -27,8 +27,15 @@ def build_job_manifest(
     kaniko_image: str,
     insecure_registry_tls: bool,
     registry_server: str,
+    pip_extra_index_url: str = "",
+    kaniko_cache: bool = False,
 ) -> dict[str, Any]:
-    """Render and customize the Job manifest used to build model images."""
+    """Render and customize the Job manifest used to build model images.
+
+    `pip_extra_index_url` is passed to the model's `pip install` (e.g. PyTorch CPU
+    wheels). With `kaniko_cache`, layers are cached in `<registry>[/<namespace>]/kaniko-cache`
+    (next to the target image), so the dependency layer is reused across builds.
+    """
 
     manifest = load_template_yaml("job.yaml")
     prepare_script = load_template_text("prepare_build_context.sh")
@@ -56,9 +63,16 @@ def build_job_manifest(
         "--context=dir:///workspace/context",
         f"--destination={target_image}",
         f"--build-arg=BASE_IMAGE={base_image}",
-        "--single-snapshot",           # <--- ADD THIS
-        "--compressed-caching=false",  # <--- ADD THIS,
+        "--compressed-caching=false",
     ]
+    if pip_extra_index_url:
+        kaniko_args.append(f"--build-arg=MODEL_PIP_EXTRA_INDEX_URL={pip_extra_index_url}")
+    if kaniko_cache:
+        # Layer caching needs one layer per instruction, so no --single-snapshot here.
+        cache_repo = f"{target_image.rsplit('/', 1)[0]}/kaniko-cache"
+        kaniko_args.extend(["--cache=true", f"--cache-repo={cache_repo}"])
+    else:
+        kaniko_args.append("--single-snapshot")
     if insecure_registry_tls:
         kaniko_args.extend(["--skip-tls-verify", "--skip-tls-verify-pull"])
         if registry_server:

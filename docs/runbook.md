@@ -1,259 +1,227 @@
 # Runbook: MLflow Models on Kubernetes
 
-Updated: 2026-04-16
+Updated: 2026-11-19
 
-This runbook describes the operational flow currently implemented in this repository.
+This runbook describes the operational flow implemented in this repository. Every
+step goes through `bentloy.py` (Python 3.12, standard library only).
 
 Technical reference:
 
 - `docs/gateway_technical.md`
+- `k8s/README.md` (templates and values)
 
 ## 1) Prerequisites
 
 | Component | Required | Notes |
 |---|---|---|
+| Python 3.12 | Yes | Runs `bentloy.py` |
 | Kubernetes access (`kubectl`) | Yes | Correct context and RBAC permissions |
-| Docker | Yes | Required for local shared image builds |
-| Registry credentials | Yes | For push/pull (`REGISTRY_USERNAME`, `REGISTRY_PASSWORD`) |
-| MLflow Tracking URI | Yes | Needed to resolve/download model artifacts |
-| PowerShell or Bash | Yes | Both script variants are available |
+| Docker | Yes | Builds and pushes the gateway and model base images |
+| Registry credentials | Yes | `REGISTRY_USERNAME`, `REGISTRY_PASSWORD` |
+| MLflow Tracking URI | Yes | Reachable from the pods |
 
-## 2) Environment configuration (`.env`)
+## 2) Configuration (`.env`)
 
-Use `.env_example` as template. Minimum recommended configuration:
+Copy `.env_example` to `.env`. Required:
 
 ```env
 MLFLOW_TRACKING_URI=http://mlflow-host:5000
-K8S_NAMESPACE=api-models
-MODEL_SERVICE_PREFIX=model
-MODEL_URL_TEMPLATE=http://{service_name}:3000
-GATEWAY_PORT=8000
-
 REGISTRY_SERVER=registry.example.com
-TU_ORG=my-project
+REGISTRY_NAMESPACE=my-project
 REGISTRY_USERNAME=YOUR_REGISTRY_USER
 REGISTRY_PASSWORD=YOUR_REGISTRY_TOKEN_OR_PASSWORD
-MODEL_REGISTRY_SECRET=model-registry-creds
-
-MODEL_BASE_IMAGE=registry.example.com/my-project/model-service-base:py310
-KANIKO_SKIP_TLS_VERIFY=1
-
-AUTO_DEPLOY_ENABLED=1
-DEPLOY_BUILD_TIMEOUT_SEC=1800
-DEPLOY_ROLLOUT_TIMEOUT_SEC=300
-
-GATEWAY_IMAGE=registry.example.com/my-project/model-gateway:20260416-01
-MODEL_SERVICE_IMAGE=registry.example.com/my-project/model-service:20260416-01
+K8S_NAMESPACE=default
 ```
 
-Notes:
+Everything else is optional and documented in `.env_example`. Notes:
 
 1. `REGISTRY_SERVER` must be only the registry host.
-2. Keep image tags aligned with your latest `build_images` execution.
-3. Use `KANIKO_SKIP_TLS_VERIFY=1` only when registry trust is not configured.
+2. Registry credentials are also written to the cluster Secret, so on shared clusters
+   prefer a robot/service account. If you leave them empty, the Secret
+   (`MODEL_REGISTRY_SECRET`) must already exist in the namespace, or `up` stops
+   before building anything.
+3. Set `KANIKO_SKIP_TLS_VERIFY=1` only when the registry uses a self-signed certificate.
+4. Do not set `GATEWAY_IMAGE` / `MODEL_BASE_IMAGE` unless you want to pin existing
+   images: by default they are built from the repository.
+5. Environment variables override `.env`; `--env-file` selects another file
+   (e.g. one per cluster).
 
-## 3) From zero: bootstrap and gateway
-
-### 3.1 Registry login
-
-PowerShell/Bash:
-
-```bash
-docker login <REGISTRY_SERVER>
-```
-
-### 3.2 Create/update image pull secret
-
-PowerShell:
-
-```powershell
-.\k8s\bootstrap\create_registry_secret.ps1 -Namespace api-models -SecretName model-registry-creds
-```
-
-Bash:
+## 3) Deploy or update the gateway
 
 ```bash
-./k8s/bootstrap/create_registry_secret.sh api-models model-registry-creds
+python bentloy.py up --dry-run   # optional: review plan and manifests
+python bentloy.py up
 ```
 
-### 3.3 Build and push base image
+`up` is idempotent and runs, in order:
 
-PowerShell:
+1. Computes the image tags from a hash of the files copied into each image:
+   - `<REGISTRY_SERVER>[/<REGISTRY_NAMESPACE>]/model-gateway:<hash>`
+   - `<REGISTRY_SERVER>[/<REGISTRY_NAMESPACE>]/model-service-base:py312-<hash>`
+2. Checks first that the cluster is reachable and that the registry Secret can be
+   created (credentials in `.env`) or already exists, so a problem there does not
+   show up after a long build.
+3. `docker login` with the `.env` credentials, then builds and pushes each image
+   only if that tag is not in the registry yet. Fails with a clear message if the
+   Docker engine is not running.
+4. Creates the namespace if needed and applies the registry Secret
+   (`MODEL_REGISTRY_SECRET`) when `REGISTRY_USERNAME/PASSWORD` are set.
+5. Renders `k8s/templates/gateway.yaml` (ServiceAccount, RBAC, ConfigMap,
+   Deployment, Service) and applies it.
+6. Waits for the rollout and prints the external URL when the LoadBalancer has one.
 
-```powershell
-.\k8s\bootstrap\build_model_base_image.ps1 -Org <TU_ORG> -Tag py310
-```
+Options: `--force-build` (rebuild even if the tags exist), `--no-build` (only apply),
+`--no-wait`.
 
-Bash:
+To only build and push the images (e.g. in CI) and get their references:
 
 ```bash
-./k8s/bootstrap/build_model_base_image.sh <TU_ORG> py310
+python bentloy.py build            # or --print-only to just compute the tags
 ```
 
-### 3.4 Build and push shared images (`gateway`, `model_service`)
-
-PowerShell:
-
-```powershell
-.\k8s\build_images.ps1 -Tag 20260416-01 -RegistryPrefix <REGISTRY_SERVER>/<TU_ORG>
-```
-
-Bash:
+## 4) Deploy a model
 
 ```bash
-./k8s/build_images.sh 20260416-01 <REGISTRY_SERVER>/<TU_ORG>
+python bentloy.py deploy tiny_demo_model
+python bentloy.py deploy tiny_demo_model --version 3 --name tiny_demo_prod --append-date
 ```
 
-These scripts are Dockerfile-only for shared images.  
-If neither source code nor dependencies changed in `gateway/` and `model_service/`, you can reuse previously published tags and skip this step.
+The command calls `POST /deploy_model` on the gateway and follows
+`POST /deploy_status` until the operation ends. The gateway:
 
-### 3.5 Deploy gateway (YAML)
+1. Runs a Kaniko Job that downloads the model from MLflow and builds
+   `<REGISTRY_SERVER>[/<REGISTRY_NAMESPACE>]/model-<slug>:<tag>` on top of the model base image,
+   installing the model's own requirements.
+2. Creates the `bentloy-model-<deployed-name>` Deployment and Service and waits for the rollout.
 
-PowerShell:
+Options:
 
-```powershell
-kubectl apply -f .\k8s\yaml\gateway.yaml
-kubectl -n api-models rollout status deploy/gateway --timeout=180s
-kubectl -n api-models get deploy,svc,pods
-```
+| Option | Meaning |
+|---|---|
+| `--version` | MLflow model version (default `latest`: Production stage, else highest version) |
+| `--name` | Deployed name; it is the `model_name` used in `/predict` |
+| `--append-date` | Appends `_YYYYMMDD` to the deployed name |
+| `--replicas` | Model replicas |
+| `--model-uri` / `--run-id` | Explicit MLflow source instead of the registry |
+| `--experiment-name` | MLflow experiment of the run; lets `list_models` filter deployments by model |
+| `--no-wait` | Return after queuing; follow with `python bentloy.py status <operation_id>` |
 
-Bash:
+Terminal statuses: `ready`, `failed` (intermediate: `queued`, `building`,
+`pushing`, `deploying`).
+
+### Other model operations
 
 ```bash
-kubectl apply -f ./k8s/yaml/gateway.yaml
-kubectl -n api-models rollout status deploy/gateway --timeout=180s
-kubectl -n api-models get deploy,svc,pods
+python bentloy.py models [--query demo] [--experiment-name <exp>] [--run-id <id>] [--json]
+python bentloy.py predict tiny_demo_prod x1=5 x2=2 x3=3
+python bentloy.py status <operation_id>
+python bentloy.py delete tiny_demo_prod     # or the service name: bentloy-model-tiny-demo-prod
 ```
 
-The script prints `Gateway URL` when LoadBalancer ingress becomes available.
+`predict` input forms: `column=value` pairs, a JSON object of columns, a JSON list
+of features, or `--file input.json` (see 5.2 for the formats).
 
-## 4) Deploy one model (image-per-model)
+`delete` removes the Deployment, the Service and the model image from the registry.
 
-### 4.1 Build model image inside cluster (Kaniko Job)
+### Reaching the gateway
 
-PowerShell:
+The model commands use `GATEWAY_URL` when set; otherwise they open a temporary
+`kubectl port-forward` to `svc/bentloy-gateway`. `--gateway-url` overrides both.
 
-```powershell
-.\k8s\build_model_image_job.ps1 -ModelName tiny_demo_model -ModelVersion latest -Namespace api-models -Wait -InsecureRegistryTls
-```
+## 5) API calls
 
-Bash:
+`<gateway_url>` is the LoadBalancer URL, or `http://localhost:8000` after
+`kubectl -n <K8S_NAMESPACE> port-forward svc/bentloy-gateway 8000:8000`.
+
+### 5.1 List models
 
 ```bash
-./k8s/build_model_image_job.sh --model-name tiny_demo_model --model-version latest --namespace api-models --wait --insecure-registry-tls
+curl -X POST "<gateway_url>/list_models" -H "Content-Type: application/json" \
+  -d '{"page": 0, "page_size": 10, "query": ""}'
 ```
 
-Copy the `Target image:` from output.
+Add `"experiment_name": "<experiment>"` and/or `"run_id": "<run_id>"` to get only the
+deployments and operations of one model or one version (exact match).
 
-### 4.2 Deploy the generated model image
-
-PowerShell:
-
-```powershell
-.\k8s\deploy_model_image.ps1 -ModelName tiny_demo_model -ModelImage <REGISTRY_SERVER>/<TU_ORG>/model-tiny-demo-model:<tag> -Namespace api-models -Replicas 1 -DeployedName tiny_demo_model_v2 -AppendDate
-kubectl -n api-models get deploy | findstr model-
-```
-
-Bash:
-
-```bash
-./k8s/deploy_model_image.sh tiny_demo_model <REGISTRY_SERVER>/<TU_ORG>/model-tiny-demo-model:<tag> api-models 1 tiny_demo_model_v2 true
-kubectl -n api-models get deploy | grep model-
-```
-
-Notes:
-
-1. `ModelName` is still the MLflow source model.
-2. `DeployedName` controls Kubernetes resource naming and the `model_name` you call in gateway `/predict`.
-3. `AppendDate` appends `YYYYMMDD` to `DeployedName`.
-4. Manifests are rendered from templates: `k8s/yaml/model_service/deployment.yaml` and `k8s/yaml/model_service/service.yaml`.
-
-## 5) Deploy by gateway endpoint (async)
-
-### 5.1 Start deploy
-
-```powershell
-$gatewayUrl = "http://<gateway-ip-or-host>:8000"
-$body = @{
-  model_name = "tiny_demo_model_2"
-  model_version = "latest"
-  namespace = "api-models"
-  replicas = 1
-  tracking_uri = "http://mlflow-host:5000"
-  insecure_registry_tls = $true
-  deployed_name = "tiny_demo_model_prod"
-  append_date = $true
-} | ConvertTo-Json
-
-$result = Invoke-RestMethod -Method Post -Uri "$gatewayUrl/deploy_model" -ContentType "application/json" -Body $body
-$result
-```
-
-### 5.2 Poll status
-
-```powershell
-$operationId = $result.operation_id
-do {
-  $statusBody = @{ operation_id = $operationId } | ConvertTo-Json
-  $status = Invoke-RestMethod -Method Post -Uri "$gatewayUrl/deploy_status" -ContentType "application/json" -Body $statusBody
-  $status
-  Start-Sleep -Seconds 3
-} while ($status.status -in @("queued", "building", "pushing", "deploying"))
-```
-
-Expected terminal statuses:
-
-1. `ready`
-2. `failed`
-
-When `deployed_name` is set (or `append_date=true`), call `/predict` using that deployed alias.
-
-## 6) API verification
-
-### 6.1 List models
-
-```bash
-curl -X POST "<gateway_url>/list_models" -H "Content-Type: application/json" -d "{}"
-```
-
-### 6.2 Predict
+### 5.2 Predict
 
 ```bash
 curl -X POST "<gateway_url>/predict" \
   -H "Content-Type: application/json" \
-  -d "{\"model_name\":\"tiny_demo_model\",\"data\":{\"features\":[1.0,2.0,3.0]}}"
+  -d '{"model_name": "tiny_demo_model", "data": {"x1": 1.0, "x2": 2.0, "x3": 3.0}}'
 ```
 
-## 7) What to rerun and when
+`data` formats:
 
-| Change | Repeat step |
+| Format | Example | Use |
+|---|---|---|
+| Named columns | `{"x1": 1.0, "x2": 2.0}` | Tabular models (Ludwig, scikit-learn with a signature...). Recommended. |
+| `features` list | `{"features": [1.0, 2.0]}` | For models with named inputs (MLflow signature or Ludwig schema) the values are mapped to the columns in order; `[[...], [...]]` sends several rows. For tensor models: 1D = one sample, 2D = one temporal sample, 3D = batch. |
+
+The response is `{"model": ..., "predictions": [...]}`; Ludwig models return one
+`<output>_predictions` field per output feature.
+
+### 5.3 Deploy by endpoint
+
+```bash
+curl -X POST "<gateway_url>/deploy_model" -H "Content-Type: application/json" \
+  -d '{"model_name": "tiny_demo_model", "model_version": "latest", "deployed_name": "tiny_demo_prod"}'
+# One version (run) of an experiment:
+curl -X POST "<gateway_url>/deploy_model" -H "Content-Type: application/json" \
+  -d '{"model_name": "churn_v2", "run_id": "<run_id>", "model_uri": "runs:/<run_id>/ludwig-model", "experiment_name": "<experiment>"}'
+curl -X POST "<gateway_url>/deploy_status" -H "Content-Type: application/json" \
+  -d '{"operation_id": "<operation_id>"}'
+```
+
+## 6) What to rerun and when
+
+| Change | Command |
 |---|---|
-| Registry credentials changed | `create_registry_secret.*` |
-| Base runtime dependencies changed | `build_model_base_image.*` |
-| Gateway/model_service source changed | `build_images.*` + `kubectl apply -f k8s/yaml/gateway.yaml` |
-| New model only | `build_model_image_job.*` + `deploy_model_image.*` |
-| Cluster/namespace recreated | Full bootstrap from section 3 |
+| Gateway or model_service code/dependencies | `python bentloy.py up` (rebuilds only what changed) |
+| `.env` values (MLflow, registry, timeouts...) | `python bentloy.py up` (restarts the gateway if its config changed) |
+| Registry credentials | `python bentloy.py up` (re-applies the Secret) |
+| New model or model version | `python bentloy.py deploy <model>` |
+| Cluster/namespace recreated | `python bentloy.py up` |
 
-## 8) Troubleshooting
+Note: models already deployed keep the base image they were built with; redeploy
+them to pick up a new model base image.
 
-### 8.1 `list_models` empty
+### Model build speed
 
-1. Check model service name prefix (`model-...`).
-2. Check namespace (`MODEL_NAMESPACE` in gateway env).
-3. Check gateway RBAC can list services/pods.
+The first build of a model with heavy dependencies (e.g. Ludwig -> PyTorch) takes
+several minutes. Two settings keep it down (both on by default):
 
-### 8.2 `Model not available` in `/predict`
+1. `MODEL_PIP_EXTRA_INDEX_URL` (default `https://download.pytorch.org/whl/cpu`):
+   PyTorch is installed as CPU wheels, without the CUDA libraries (several GB less to
+   build, push and pull). Set it empty on GPU clusters.
+2. `KANIKO_CACHE=1`: the dependency layer is cached in `<REGISTRY_SERVER>[/<REGISTRY_NAMESPACE>]/kaniko-cache`,
+   so later models/versions with the same requirements skip the `pip install`.
+   The registry account needs push permission on that repository (same project).
 
-1. Confirm model deployment is `Ready`.
-2. Confirm service exists and answers `/predict`.
-3. Check gateway routing target in `/list_models`.
+## 7) Troubleshooting
 
-### 8.3 Shared image build strategy
+### 7.1 `models` is empty
 
-`k8s/build_images.*` builds shared images directly from Dockerfiles (no Bento fallback path).
+1. Check the model service name prefix (`model-...`).
+2. Check `K8S_NAMESPACE` (the gateway only looks in its own namespace).
+3. Check the gateway RBAC can list services/pods: `kubectl -n <ns> get role bentloy-gateway -o yaml`.
 
-### 8.4 Kaniko TLS / registry errors
+### 7.2 `Model not available` in `/predict`
 
-1. For self-signed registries, keep `KANIKO_SKIP_TLS_VERIFY=1`.
-2. Ensure `MODEL_REGISTRY_SECRET` exists in the target namespace.
-3. Verify push permissions for `<REGISTRY_SERVER>/<TU_ORG>`.
+1. Confirm the model Deployment is `Ready`.
+2. Confirm the Service exists and answers `/predict`.
+3. Check the routing target in `python bentloy.py models --json`.
+
+### 7.3 Registry / TLS errors
+
+1. Self-signed registry: set `KANIKO_SKIP_TLS_VERIFY=1` (also used for
+   `docker manifest inspect --insecure` when checking existing images), and make
+   sure the Docker daemon trusts the registry or lists it in `insecure-registries`.
+2. Check the Secret exists: `kubectl -n <ns> get secret <MODEL_REGISTRY_SECRET>`.
+3. Verify push permissions for `<REGISTRY_SERVER>[/<REGISTRY_NAMESPACE>]`.
+
+### 7.4 A model image fails to build
+
+Read the Kaniko Job logs (`python bentloy.py status <operation_id>` shows the error).
+If a library is missing at runtime, make sure the model was logged to MLflow with its
+requirements: the base image only contains `mlflow-skinny`, numpy, pandas and pyarrow.
