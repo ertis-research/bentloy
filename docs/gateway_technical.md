@@ -85,8 +85,11 @@ One MLflow experiment = one model; each MLflow run = one version of it.
   `discovered_models` and `deploy_operations` before pagination. When either is set,
   `configured_models` and `recently_routed_models` are empty. `query` is a case-insensitive
   substring of the deployed name, applied to `discovered_models` and `deploy_operations`.
-- `page` is shared by every list; a page past the end of a list returns it empty
-  (`has_next: false`, and `has_previous: false` when the list has no items).
+- `page` starts at 1 (default `1`) and is shared by every list. `page < 1` answers `400`
+  with `{"error": msg, "detail": msg}`. A page past the end of a list returns it empty
+  (`has_next: false`, `has_previous: true`). Each `pagination.<list>` has `total_items`,
+  `total_pages` (`ceil(total_items / page_size)`, `0` for an empty list), `current_page`,
+  `page_size`, `has_next` (`current_page < total_pages`) and `has_previous` (`current_page > 1`).
 
 ### Failed operations: `error` and `error_log`
 

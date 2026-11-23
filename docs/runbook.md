@@ -137,7 +137,7 @@ The model commands use `GATEWAY_URL` when set; otherwise they open a temporary
 
 ```bash
 curl -X POST "<gateway_url>/list_models" -H "Content-Type: application/json" \
-  -d '{"page": 0, "page_size": 10, "query": ""}'
+  -d '{"page": 1, "page_size": 10, "query": ""}'
 ```
 
 Add `"experiment_name": "<experiment>"` and/or `"run_id": "<run_id>"` to get only the

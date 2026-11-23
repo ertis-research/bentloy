@@ -510,6 +510,23 @@ class GatewayDeployErrorsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status_code, 403)
         self.assertIn("disabled", body["detail"])
 
+    async def test_list_models_page_is_one_indexed(self) -> None:
+        service = self._service()
+        service.info_handler.discover_k8s_model_services = AsyncMock(return_value=([], None))
+
+        ctx = _FakeContext()
+        result = await service.list_models(ctx=ctx)
+        self.assertEqual(ctx.response.status_code, 200)
+        self.assertEqual(result["pagination"]["endpoints"]["current_page"], 1)
+
+        for page in (0, -1):
+            ctx = _FakeContext()
+            body = await service.list_models(page=page, ctx=ctx)
+            self.assertEqual(ctx.response.status_code, 400, page)
+            self.assertIn("page must be >= 1", body["detail"])
+            self.assertEqual(body["error"], body["detail"])
+            self.assertNotIn("pagination", body)
+
     async def test_default_images_with_and_without_namespace(self) -> None:
         cases = {
             "api-models": (

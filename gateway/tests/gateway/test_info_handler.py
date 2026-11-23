@@ -1,7 +1,7 @@
 import unittest
 
 from gateway.app.deploy.operation_store import DeployOperationStore
-from gateway.app.handlers.info_handler import InfoHandler
+from gateway.app.handlers.info_handler import InfoHandler, ListModelsRequestError, paginate
 from gateway.app.routing.discovery import KubernetesModelDiscovery
 
 
@@ -133,7 +133,7 @@ class InfoHandlerTest(unittest.IsolatedAsyncioTestCase):
             return [], "simulated discovery error"
 
         handler.discover_k8s_model_services = fake_discovery_error  # type: ignore[method-assign]
-        result = await handler.list_models(page=0, page_size=10, query="")
+        result = await handler.list_models(page=1, page_size=10, query="")
 
         self.assertEqual(result["discovery"]["status"], "error")
         self.assertEqual(result["discovery"]["error"], "simulated discovery error")
@@ -143,11 +143,11 @@ class InfoHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["pagination"]["configured_models"]["total_items"], 1)
         self.assertFalse(result["pagination"]["configured_models"]["has_next"])
 
-        filtered = await handler.list_models(page=0, page_size=10, query="zz")
+        filtered = await handler.list_models(page=1, page_size=10, query="zz")
         self.assertEqual(filtered["configured_models"], [])
         self.assertEqual(filtered["recently_routed_models"], [])
 
-        second_page = await handler.list_models(page=1, page_size=1, query="")
+        second_page = await handler.list_models(page=2, page_size=1, query="")
         self.assertEqual(second_page["configured_models"], [])
         self.assertTrue(second_page["pagination"]["configured_models"]["has_previous"])
 
@@ -210,13 +210,13 @@ class InfoHandlerTest(unittest.IsolatedAsyncioTestCase):
         handler.discover_k8s_model_services = fake_discovery  # type: ignore[method-assign]
 
         # No filter: everything, as before.
-        result = await handler.list_models(page=0, page_size=10, query="")
+        result = await handler.list_models(page=1, page_size=10, query="")
         self.assertEqual(len(result["discovered_models"]), 4)
         self.assertEqual(len(result["deploy_operations"]), 3)
         self.assertEqual(result["configured_models"], ["a"])
 
         # Exact experiment filter: "Churn" does not match "Churn EU".
-        result = await handler.list_models(page=0, page_size=10, query="", experiment_name="Churn")
+        result = await handler.list_models(page=1, page_size=10, query="", experiment_name="Churn")
         self.assertEqual(
             [svc["service_name"] for svc in result["discovered_models"]],
             ["model-churn-v1", "model-churn-v2"],
@@ -232,20 +232,20 @@ class InfoHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["pagination"]["discovered_models"]["total_items"], 2)
 
         # Pagination applies to the filtered result.
-        page_1 = await handler.list_models(page=1, page_size=1, query="", experiment_name="Churn")
+        page_2 = await handler.list_models(page=2, page_size=1, query="", experiment_name="Churn")
         self.assertEqual(
-            [svc["service_name"] for svc in page_1["discovered_models"]], ["model-churn-v2"]
+            [svc["service_name"] for svc in page_2["discovered_models"]], ["model-churn-v2"]
         )
-        self.assertFalse(page_1["pagination"]["discovered_models"]["has_next"])
+        self.assertFalse(page_2["pagination"]["discovered_models"]["has_next"])
 
         # Run filter (one version), combinable with the experiment filter.
-        result = await handler.list_models(page=0, page_size=10, query="", run_id=run_a2)
+        result = await handler.list_models(page=1, page_size=10, query="", run_id=run_a2)
         self.assertEqual(
             [svc["service_name"] for svc in result["discovered_models"]], ["model-churn-v2"]
         )
         self.assertEqual([op["operation_id"] for op in result["deploy_operations"]], ["op_a2"])
         result = await handler.list_models(
-            page=0, page_size=10, query="", experiment_name="Churn EU", run_id=run_a2
+            page=1, page_size=10, query="", experiment_name="Churn EU", run_id=run_a2
         )
         self.assertEqual(result["discovered_models"], [])
         self.assertEqual(result["deploy_operations"], [])
@@ -279,19 +279,21 @@ class InfoHandlerTest(unittest.IsolatedAsyncioTestCase):
 
         handler.discover_k8s_model_services = no_services  # type: ignore[method-assign]
 
-        result = await handler.list_models(page=0, page_size=10, query="e2e_q")
+        result = await handler.list_models(page=1, page_size=10, query="e2e_q")
         self.assertEqual(
             sorted(op["operation_id"] for op in result["deploy_operations"]), ["op_1", "op_2"]
         )
         self.assertEqual(result["pagination"]["deploy_operations"]["total_items"], 2)
-        result = await handler.list_models(page=0, page_size=10, query="e2e_qa")
+        result = await handler.list_models(page=1, page_size=10, query="e2e_qa")
         self.assertEqual([op["operation_id"] for op in result["deploy_operations"]], ["op_1"])
-        result = await handler.list_models(page=0, page_size=10, query="")
+        result = await handler.list_models(page=1, page_size=10, query="")
         self.assertEqual(len(result["deploy_operations"]), 3)
 
-    async def test_out_of_range_page_metadata(self) -> None:
+    def _paged_handler(self, services: list[dict]) -> InfoHandler:
+        """Handler with 3 configured models, 3 discovered services and no operations."""
+
         handler = InfoHandler(
-            model_urls={"a": "http://model-a:3000"},
+            model_urls={name: f"http://model-{name}:3000" for name in ("a", "b", "c")},
             model_service_prefix="model",
             model_namespace="api-models",
             model_url_template="http://{service_name}:3000",
@@ -301,21 +303,104 @@ class InfoHandlerTest(unittest.IsolatedAsyncioTestCase):
             resolve_k8s_auth=lambda: ("https://k8s", {}, False),
         )
 
-        async def no_services():
-            return [], None
+        async def fake_discovery():
+            return services, None
 
-        handler.discover_k8s_model_services = no_services  # type: ignore[method-assign]
+        handler.discover_k8s_model_services = fake_discovery  # type: ignore[method-assign]
+        return handler
 
-        result = await handler.list_models(page=1, page_size=1, query="")
+    @staticmethod
+    def _services(*names: str) -> list[dict]:
+        return [
+            {
+                "service_name": f"model-{name}",
+                "inferred_model_name": name,
+                "predict_endpoint": f"http://model-{name}:3000/predict",
+            }
+            for name in names
+        ]
+
+    async def test_pages_are_one_indexed(self) -> None:
+        handler = self._paged_handler(self._services("x", "y", "z"))
+
+        # page=1 returns the first items of every list.
+        first = await handler.list_models(page=1, page_size=2, query="")
+        self.assertEqual(first["configured_models"], ["a", "b"])
+        self.assertEqual([s["service_name"] for s in first["discovered_models"]], ["model-x", "model-y"])
+        self.assertEqual(list(first["endpoints"]), ["x", "y"])
+        meta = first["pagination"]["configured_models"]
+        self.assertEqual(meta["current_page"], 1)
+        self.assertEqual(meta["total_pages"], 2)
+        self.assertEqual(meta["total_items"], 3)
+        self.assertTrue(meta["has_next"])
+        self.assertFalse(meta["has_previous"])
+
+        # page=2 returns the next items and is the last page.
+        second = await handler.list_models(page=2, page_size=2, query="")
+        self.assertEqual(second["configured_models"], ["c"])
+        self.assertEqual([s["service_name"] for s in second["discovered_models"]], ["model-z"])
+        self.assertEqual(list(second["endpoints"]), ["z", "a"])
+        for key in ("configured_models", "discovered_models"):
+            meta = second["pagination"][key]
+            self.assertEqual(meta["current_page"], 2, key)
+            self.assertFalse(meta["has_next"], key)
+            self.assertTrue(meta["has_previous"], key)
+        # endpoints has 6 items (3 discovered + 3 configured): page 2 of 3.
+        self.assertTrue(second["pagination"]["endpoints"]["has_next"])
+
+    async def test_out_of_range_page_metadata(self) -> None:
+        handler = self._paged_handler([])
+
+        result = await handler.list_models(page=5, page_size=2, query="")
         pagination = result["pagination"]
-        # Out of range for a list with data: empty slice, previous page exists, no next.
+        # Out of range: empty slice (not clamped to the last page), no next, previous exists.
         self.assertEqual(result["configured_models"], [])
-        self.assertTrue(pagination["configured_models"]["has_previous"])
+        self.assertEqual(result["endpoints"], {})
+        self.assertEqual(pagination["configured_models"]["current_page"], 5)
+        self.assertEqual(pagination["configured_models"]["total_pages"], 2)
         self.assertFalse(pagination["configured_models"]["has_next"])
-        # Empty lists never report a previous page.
+        self.assertTrue(pagination["configured_models"]["has_previous"])
+
+    async def test_empty_list_has_zero_pages(self) -> None:
+        handler = self._paged_handler([])
+
+        result = await handler.list_models(page=1, page_size=2, query="")
         for key in ("recently_routed_models", "discovered_models", "deploy_operations"):
-            self.assertFalse(pagination[key]["has_previous"], key)
-            self.assertFalse(pagination[key]["has_next"], key)
+            meta = result["pagination"][key]
+            self.assertEqual(meta["total_items"], 0, key)
+            self.assertEqual(meta["total_pages"], 0, key)
+            self.assertFalse(meta["has_next"], key)
+            self.assertFalse(meta["has_previous"], key)
+
+    async def test_page_below_one_is_rejected(self) -> None:
+        handler = self._paged_handler([])
+
+        for page in (0, -1):
+            with self.assertRaises(ListModelsRequestError) as caught:
+                await handler.list_models(page=page, page_size=2, query="")
+            self.assertEqual(caught.exception.status_code, 400)
+            self.assertIn("page must be >= 1", caught.exception.message)
+
+
+class PaginateTest(unittest.TestCase):
+    def test_slices_and_metadata(self) -> None:
+        items = list(range(5))
+        self.assertEqual(paginate(items, 1, 2)[0], [0, 1])
+        self.assertEqual(paginate(items, 3, 2)[0], [4])
+        self.assertEqual(paginate(items, 4, 2)[0], [])
+        meta = paginate(items, 3, 2)[1]
+        self.assertEqual(
+            meta,
+            {
+                "total_items": 5,
+                "total_pages": 3,
+                "current_page": 3,
+                "page_size": 2,
+                "has_next": False,
+                "has_previous": True,
+            },
+        )
+        self.assertEqual(paginate([], 1, 10)[1]["total_pages"], 0)
 
 
 if __name__ == "__main__":

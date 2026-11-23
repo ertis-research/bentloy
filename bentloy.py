@@ -603,7 +603,7 @@ def cmd_models(args: argparse.Namespace, config: dict[str, str]) -> None:
         print(f"{name:<40} {endpoint}")
     meta = (result.get("pagination") or {}).get("endpoints") or {}
     if meta.get("total_pages", 0) > 1:
-        print(f"\nPage {meta['current_page'] + 1}/{meta['total_pages']} (--page is 0-indexed).")
+        print(f"\nPage {meta['current_page']}/{meta['total_pages']}.")
     if (result.get("discovery") or {}).get("status") == "error":
         print(f"\nWarning: Kubernetes discovery failed: {result['discovery']['error']}")
 
@@ -713,7 +713,7 @@ def build_parser() -> argparse.ArgumentParser:
     models.add_argument("--query", default="", help="Substring of the deployed name.")
     models.add_argument("--experiment-name", default="", help="Only this MLflow experiment (exact).")
     models.add_argument("--run-id", default="", help="Only this MLflow run (exact).")
-    models.add_argument("--page", type=int, default=0)
+    models.add_argument("--page", type=int, default=1, help="Page number, starting at 1.")
     models.add_argument("--page-size", type=int, default=50)
     models.add_argument("--json", action="store_true", help="Print the full gateway response.")
     models.set_defaults(func=cmd_models)

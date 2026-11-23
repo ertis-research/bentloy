@@ -9,6 +9,36 @@ from ..deploy.operation_store import DeployOperationStore
 from ..routing.discovery import KubernetesModelDiscovery, sort_newest_first
 
 
+class ListModelsRequestError(Exception):
+    """A list_models request with invalid parameters; carries the HTTP status to answer with."""
+
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
+def paginate(items: list[Any], page: int, page_size: int) -> tuple[list[Any], dict[str, Any]]:
+    """Return the 1-indexed `page` of `items` and its pagination metadata.
+
+    A page past the end returns an empty slice (it is not clamped to the last page):
+    `page` is shared by every list in /list_models, and clamping would repeat items
+    while a client walks the longest list.
+    """
+
+    total_items = len(items)
+    total_pages = math.ceil(total_items / page_size) if page_size > 0 else 0
+    start = (page - 1) * page_size
+    return items[start:start + page_size], {
+        "total_items": total_items,
+        "total_pages": total_pages,
+        "current_page": page,
+        "page_size": page_size,
+        "has_next": page < total_pages,
+        "has_previous": page > 1,
+    }
+
+
 def _default_client_factory(timeout: float) -> httpx.AsyncClient:
     """Build the default async HTTP client used by info requests."""
 
@@ -95,14 +125,17 @@ class InfoHandler:
         and `run_id` are exact filters on discovered models and deploy operations; when
         either is set, configured and recently routed models (which belong to no
         experiment) are left out.
+
+        `page` is 1-indexed and shared by every list; `page < 1` raises
+        ListModelsRequestError (400).
         """
+        if page < 1:
+            raise ListModelsRequestError(f"page must be >= 1 (got {page}); pagination starts at 1.")
+
         query_lower = (query or "").lower()
         experiment_name = (experiment_name or "").strip()
         run_id = (run_id or "").strip()
         model_filter = bool(experiment_name or run_id)
-
-        # Safely clamp the page to a minimum of 0 (0-indexed pagination)
-        safe_page = max(0, page)
 
         # 1. Gather and filter base lists
         configured_names = [] if model_filter else sorted([
@@ -149,41 +182,18 @@ class InfoHandler:
                 if query_lower in (op.get("deployed_name") or "").lower()
             ]
 
-        # 4. Helper function to calculate slices and metadata per list (0-indexed)
-        def paginate_list(data_length: int):
-            total_pages = math.ceil(data_length / page_size) if page_size > 0 else 0
-            
-            # 0-indexed start and end calculation
-            start = safe_page * page_size
-            end = start + page_size
-            
-            return start, end, {
-                "total_items": data_length,
-                "total_pages": total_pages,
-                "current_page": safe_page,
-                "page_size": page_size,
-                # In 0-indexed, the last page is total_pages - 1
-                "has_next": safe_page < (total_pages - 1) if total_pages > 0 else False,
-                # `page` is shared by every list, so an out-of-range page still returns
-                # an empty slice (clamping would repeat items while the client walks the
-                # longest list). An empty list never has a previous page.
-                "has_previous": safe_page > 0 and total_pages > 0,
-            }
-
-        # 5. Calculate indices and metadata for each list
-        c_start, c_end, c_meta = paginate_list(len(configured_names))
-        r_start, r_end, r_meta = paginate_list(len(recently_routed_names))
-        d_start, d_end, d_meta = paginate_list(len(discovered_filtered))
-        e_start, e_end, e_meta = paginate_list(len(endpoints_keys))
-        o_start, o_end, o_meta = paginate_list(len(all_operations))
-
-        # 6. Apply the slices to the data
-        paginated_endpoints = {k: all_endpoints[k] for k in endpoints_keys[e_start:e_end]}
+        # 4. Paginate each list with the same page
+        configured_page, c_meta = paginate(configured_names, page, page_size)
+        routed_page, r_meta = paginate(recently_routed_names, page, page_size)
+        discovered_page, d_meta = paginate(discovered_filtered, page, page_size)
+        endpoint_keys_page, e_meta = paginate(endpoints_keys, page, page_size)
+        operations_page, o_meta = paginate(all_operations, page, page_size)
+        paginated_endpoints = {k: all_endpoints[k] for k in endpoint_keys_page}
 
         return {
-            "configured_models": configured_names[c_start:c_end],
-            "recently_routed_models": recently_routed_names[r_start:r_end],
-            "discovered_models": discovered_filtered[d_start:d_end],
+            "configured_models": configured_page,
+            "recently_routed_models": routed_page,
+            "discovered_models": discovered_page,
             "dynamic_routing": {
                 "enabled": True,
                 "service_prefix": self.model_service_prefix,
@@ -205,7 +215,7 @@ class InfoHandler:
                 "status": "ok" if discovery_error is None else "error",
                 "error": discovery_error,
             },
-            "deploy_operations": all_operations[o_start:o_end],
+            "deploy_operations": operations_page,
             "endpoints": paginated_endpoints,
             "pagination": {
                 "configured_models": c_meta,

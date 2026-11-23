@@ -426,6 +426,7 @@ class CommandsTest(unittest.TestCase):
         self.assertEqual(calls[1][0], "list_models")
         self.assertEqual(calls[1][1]["experiment_name"], "Churn EU")
         self.assertEqual(calls[1][1]["run_id"], run_id)
+        self.assertEqual(calls[1][1]["page"], 1)
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ try:
     from .app.deploy.deploy_handler import DeployHandler, DeployRequestError
     from .app.deploy.operation_store import DeployOperationStore
     from .app.deploy.orchestrator import DeployOrchestrator
-    from .app.handlers.info_handler import InfoHandler
+    from .app.handlers.info_handler import InfoHandler, ListModelsRequestError
     from .app.handlers.predict_handler import PredictHandler
     from .app.kubernetes.auth import resolve_k8s_auth
     from .app.kubernetes.client import KubernetesApiClient
@@ -29,7 +29,7 @@ except ImportError:
     from app.deploy.deploy_handler import DeployHandler, DeployRequestError
     from app.deploy.operation_store import DeployOperationStore
     from app.deploy.orchestrator import DeployOrchestrator
-    from app.handlers.info_handler import InfoHandler
+    from app.handlers.info_handler import InfoHandler, ListModelsRequestError
     from app.handlers.predict_handler import PredictHandler
     from app.kubernetes.auth import resolve_k8s_auth
     from app.kubernetes.client import KubernetesApiClient
@@ -236,20 +236,28 @@ class GatewayService:
     @bentoml.api
     async def list_models(
         self,
-        page: int = 0,
+        page: int = 1,
         page_size: int = 10,
         query: str = "",
         experiment_name: str = "",
         run_id: str = "",
+        ctx: bentoml.Context = None,
     ) -> dict[str, Any]:
         """List configured, discovered, and recently routed models.
 
+        `page` is 1-indexed (default 1); `page < 1` answers 400 with
+        {"error": msg, "detail": msg}.
         `experiment_name` / `run_id` filter discovered models and deploy operations exactly.
         """
 
-        return await self.info_handler.list_models(
-            page, page_size, query, experiment_name=experiment_name, run_id=run_id
-        )
+        try:
+            return await self.info_handler.list_models(
+                page, page_size, query, experiment_name=experiment_name, run_id=run_id
+            )
+        except ListModelsRequestError as exc:
+            if ctx is not None:
+                ctx.response.status_code = exc.status_code
+            return {"error": exc.message, "detail": exc.message}
 
     @bentoml.api
     async def delete_operation(self, operation_id: str):
