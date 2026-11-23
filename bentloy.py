@@ -371,6 +371,27 @@ def gateway_connection(config: dict[str, str], explicit_url: str) -> Iterator[st
             proc.kill()
 
 
+class GatewayHTTPError(CliError):
+    """The gateway answered an HTTP error; `detail` is its message ("detail" field if any)."""
+
+    def __init__(self, endpoint: str, code: int, detail: str):
+        super().__init__(f"Gateway /{endpoint} returned {code}: {detail}")
+        self.code = code
+        self.detail = detail
+
+
+def _error_detail(body: str) -> str:
+    """Return the gateway's {"detail"} message from an error body, else the raw body."""
+
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return body
+    if isinstance(payload, dict) and payload.get("detail"):
+        return str(payload["detail"])
+    return body
+
+
 def call_gateway(base_url: str, endpoint: str, payload: dict[str, Any], retries: int = 0) -> Any:
     """POST a JSON payload to a BentoML endpoint and return the decoded response."""
 
@@ -386,7 +407,7 @@ def call_gateway(base_url: str, endpoint: str, payload: dict[str, Any], retries:
                 body = response.read().decode() or "null"
             return json.loads(body)
         except urllib.error.HTTPError as exc:
-            raise CliError(f"Gateway /{endpoint} returned {exc.code}: {exc.read().decode()}") from exc
+            raise GatewayHTTPError(endpoint, exc.code, _error_detail(exc.read().decode())) from exc
         except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
             if attempt >= retries:
                 raise CliError(f"Could not reach the gateway at {base_url}: {exc}") from exc
@@ -537,6 +558,7 @@ def cmd_deploy(args: argparse.Namespace, config: dict[str, str]) -> None:
         "replicas": args.replicas,
         "deployed_name": args.name or "",
         "append_date": args.append_date,
+        "overwrite": args.overwrite,
     }
     if args.model_uri:
         payload["model_uri"] = args.model_uri
@@ -546,7 +568,15 @@ def cmd_deploy(args: argparse.Namespace, config: dict[str, str]) -> None:
         payload["experiment_name"] = args.experiment_name
 
     with gateway_connection(config, args.gateway_url) as url:
-        result = call_gateway(url, "deploy_model", payload)
+        try:
+            result = call_gateway(url, "deploy_model", payload)
+        except GatewayHTTPError as exc:
+            if exc.code != 409:
+                raise
+            hint = ""
+            if not args.overwrite and "overwrite=true" in exc.detail:
+                hint = "\nPass --overwrite to replace it."
+            raise CliError(f"Deploy conflict: {exc.detail}{hint}") from exc
         if not isinstance(result, dict) or "error" in result:
             raise CliError(f"Deploy rejected: {result}")
         operation_id = result["operation_id"]
@@ -702,6 +732,8 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--run-id", default="", help="MLflow run id of the version to deploy.")
     deploy.add_argument("--experiment-name", default="",
                         help="MLflow experiment the run belongs to (used to filter by model).")
+    deploy.add_argument("--overwrite", action="store_true",
+                        help="Replace an existing deployment with the same name (slug).")
     deploy.add_argument("--no-wait", action="store_true", help="Return right after queuing the deploy.")
     deploy.set_defaults(func=cmd_deploy)
 

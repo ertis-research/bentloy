@@ -62,6 +62,28 @@ class DeployOrchestrator:
         self.registry_secret = registry_secret
         self.insecure_registry_tls_default = insecure_registry_tls_default
 
+    async def find_model_resource(
+        self, namespace: str, resource_name: str
+    ) -> dict[str, Any] | None:
+        """Return the metadata of the Service (else Deployment) named `resource_name`.
+
+        None when neither exists. Raises when the Kubernetes API cannot be read.
+        """
+
+        base_url, headers, verify = self.resolve_k8s_auth()
+        urls = (
+            f"{base_url}/api/v1/namespaces/{namespace}/services/{resource_name}",
+            f"{base_url}/apis/apps/v1/namespaces/{namespace}/deployments/{resource_name}",
+        )
+        async with self.http_client_factory(verify) as client:
+            for url in urls:
+                resource = await self.k8s_client.get_resource(
+                    client=client, headers=headers, resource_url=url
+                )
+                if resource is not None:
+                    return resource.get("metadata") or {}
+        return None
+
     async def run_operation(self, operation_id: str) -> None:
         """Execute one queued deployment operation end-to-end."""
 

@@ -7,6 +7,7 @@ import httpx
 from gateway.app.deploy.operation_store import DeployOperationStore
 from gateway.app.deploy.orchestrator import DeployOrchestrator
 from gateway.app.domain.types import DeployOperationRecord, DeployOperationRequest
+from gateway.app.kubernetes.client import KubernetesApiClient
 from gateway.service import GatewayService
 
 RUN_ID = "0123456789abcdef0123456789abcdef"
@@ -350,6 +351,7 @@ class GatewayDeployApiTest(unittest.IsolatedAsyncioTestCase):
         service.model_base_image = "registry.example.com/api-models/model-service-base:py310"
         service.deploy_handler.model_base_image = service.model_base_image
         service.deploy_orchestrator.run_operation = AsyncMock(return_value=None)
+        service.deploy_orchestrator.find_model_resource = AsyncMock(return_value=None)
 
         response = await service.deploy_model(
             model_name="tiny_demo_model",
@@ -378,6 +380,7 @@ class GatewayDeployApiTest(unittest.IsolatedAsyncioTestCase):
         service.model_base_image = "registry.example.com/api-models/model-service-base:py310"
         service.deploy_handler.model_base_image = service.model_base_image
         service.deploy_orchestrator.run_operation = AsyncMock(return_value=None)
+        service.deploy_orchestrator.find_model_resource = AsyncMock(return_value=None)
 
         response = await service.deploy_model(
             model_name="tiny_demo_model",
@@ -400,6 +403,7 @@ class GatewayDeployApiTest(unittest.IsolatedAsyncioTestCase):
         service.model_base_image = "registry.example.com/api-models/model-service-base:py310"
         service.deploy_handler.model_base_image = service.model_base_image
         service.deploy_orchestrator.run_operation = AsyncMock(return_value=None)
+        service.deploy_orchestrator.find_model_resource = AsyncMock(return_value=None)
         service.info_handler.discover_k8s_model_services = AsyncMock(return_value=([], None))
 
         model_uri = f"runs:/{RUN_ID}/ludwig-model"
@@ -452,6 +456,7 @@ class GatewayDeployErrorsTest(unittest.IsolatedAsyncioTestCase):
     def _service(self) -> GatewayService:
         service = GatewayService()
         service.deploy_orchestrator.run_operation = AsyncMock(return_value=None)
+        service.deploy_orchestrator.find_model_resource = AsyncMock(return_value=None)
         service.deploy_handler.model_base_image = "registry.example.com/api-models/base:py312"
         return service
 
@@ -559,6 +564,195 @@ class GatewayDeployErrorsTest(unittest.IsolatedAsyncioTestCase):
         status_code, body = await self._deploy(service)
         self.assertEqual(status_code, 500)
         self.assertIn("MODEL_BASE_IMAGE", body["detail"])
+
+
+def _existing_service(run_id: str = RUN_ID, experiment_name: str = "Churn Prediction") -> dict:
+    """Metadata of an existing model-service Service, as the Kubernetes API returns it."""
+
+    return {
+        "name": "bentloy-model-churn-v2",
+        "labels": {
+            "app": "model-service",
+            "model-slug": "churn-v2",
+            "bentloy.io/run-id": run_id,
+            "bentloy.io/experiment": "churn-prediction",
+        },
+        "annotations": {"bentloy.io/experiment-name": experiment_name},
+    }
+
+
+class GatewayDeployConflictTest(unittest.IsolatedAsyncioTestCase):
+    def _service(self, existing: dict | None = None) -> GatewayService:
+        service = GatewayService()
+        service.deploy_orchestrator.run_operation = AsyncMock(return_value=None)
+        service.deploy_orchestrator.find_model_resource = AsyncMock(return_value=existing)
+        service.deploy_handler.model_base_image = "registry.example.com/api-models/base:py312"
+        return service
+
+    async def _deploy(self, service: GatewayService, **kwargs) -> tuple[int, dict]:
+        ctx = _FakeContext()
+        params = {
+            "model_name": "churn_model",
+            "tracking_uri": "http://mlflow:5000",
+            "target_image": "registry.example.com/api-models/model-churn:latest",
+            **kwargs,
+        }
+        result = await service.deploy_model(ctx=ctx, **params)
+        return ctx.response.status_code, result
+
+    async def test_new_name_deploys_as_before(self) -> None:
+        service = self._service()
+        status_code, body = await self._deploy(service, deployed_name="Churn V2")
+        self.assertEqual(status_code, 200, body)
+        self.assertIn("operation_id", body)
+        service.deploy_orchestrator.find_model_resource.assert_awaited_once_with(
+            service.deploy_handler.model_namespace, "bentloy-model-churn-v2"
+        )
+
+    async def test_existing_service_answers_409_with_run_and_experiment(self) -> None:
+        service = self._service(existing=_existing_service())
+        status_code, body = await self._deploy(service, deployed_name="Churn V2")
+        self.assertEqual(status_code, 409)
+        self.assertEqual(body["error"], body["detail"])
+        for expected in ("'Churn V2'", "bentloy-model-churn-v2", RUN_ID, "'Churn Prediction'",
+                         "overwrite=true"):
+            self.assertIn(expected, body["detail"])
+        self.assertNotIn("operation_id", body)
+        self.assertEqual(await service.operation_store.list_summaries(), [])
+
+    async def test_existing_resource_without_metadata_answers_409(self) -> None:
+        service = self._service(existing={"name": "bentloy-model-churn-v2"})
+        status_code, body = await self._deploy(service, deployed_name="churn-v2")
+        self.assertEqual(status_code, 409)
+        self.assertIn("an existing deployment", body["detail"])
+
+    async def test_names_with_the_same_slug_conflict(self) -> None:
+        service = self._service()
+        status_code, body = await self._deploy(service, deployed_name="Churn_V2")
+        self.assertEqual(status_code, 200, body)
+        # The first deploy has finished: its resources now exist in Kubernetes.
+        await service.operation_store.update(body["operation_id"], status="ready")
+        service.deploy_orchestrator.find_model_resource.return_value = _existing_service()
+
+        status_code, body = await self._deploy(service, deployed_name="churn v2")
+        self.assertEqual(status_code, 409)
+        self.assertIn("'churn v2' maps to bentloy-model-churn-v2", body["detail"])
+
+        status_code, body = await self._deploy(service, deployed_name="churn v2", overwrite=True)
+        self.assertEqual(status_code, 200, body)
+        self.assertEqual(body["deployed_name"], "churn v2")
+
+    async def test_overwrite_skips_the_existence_check(self) -> None:
+        service = self._service(existing=_existing_service())
+        status_code, body = await self._deploy(service, deployed_name="Churn_V2", overwrite=True)
+        self.assertEqual(status_code, 200, body)
+        service.deploy_orchestrator.find_model_resource.assert_not_awaited()
+
+    async def test_operation_in_progress_answers_409_even_with_overwrite(self) -> None:
+        service = self._service()
+        status_code, first = await self._deploy(
+            service, deployed_name="Churn_V2", run_id=RUN_ID, experiment_name="Churn Prediction"
+        )
+        self.assertEqual(status_code, 200, first)
+
+        for status in ("queued", "building", "pushing", "deploying", "deleting"):
+            await service.operation_store.update(first["operation_id"], status=status)
+            for overwrite in (False, True):
+                with self.subTest(status=status, overwrite=overwrite):
+                    status_code, body = await self._deploy(
+                        service, deployed_name="churn v2", overwrite=overwrite
+                    )
+                    self.assertEqual(status_code, 409)
+                    for expected in (first["operation_id"], f"'{status}'", RUN_ID,
+                                     "'Churn Prediction'", "in progress"):
+                        self.assertIn(expected, body["detail"])
+
+        # Other namespaces and finished operations do not block.
+        status_code, body = await self._deploy(
+            service, deployed_name="churn v2", namespace="other-ns"
+        )
+        self.assertEqual(status_code, 200, body)
+        await service.operation_store.update(first["operation_id"], status="failed")
+        status_code, body = await self._deploy(service, deployed_name="churn v2")
+        self.assertEqual(status_code, 200, body)
+
+    async def test_concurrent_requests_queue_only_one(self) -> None:
+        service = self._service()
+        results = await asyncio.gather(
+            self._deploy(service, deployed_name="Churn_V2"),
+            self._deploy(service, deployed_name="churn v2"),
+        )
+        self.assertEqual(sorted(code for code, _ in results), [200, 409])
+        self.assertEqual(len(await service.operation_store.list_summaries()), 1)
+
+    async def test_kubernetes_unreadable_answers_503(self) -> None:
+        service = self._service()
+        service.deploy_orchestrator.find_model_resource = AsyncMock(
+            side_effect=RuntimeError("Read failed (403): forbidden")
+        )
+        status_code, body = await self._deploy(service, deployed_name="Churn V2")
+        self.assertEqual(status_code, 503)
+        self.assertIn("forbidden", body["detail"])
+        self.assertEqual(await service.operation_store.list_summaries(), [])
+
+    async def test_empty_or_too_long_slug_answers_400(self) -> None:
+        service = self._service(existing=_existing_service())
+        cases = {
+            "Invalid deployed_name": {"deployed_name": "!!! ___"},
+            "deployed_name too long": {"deployed_name": "a" * 50},
+        }
+        for expected, kwargs in cases.items():
+            with self.subTest(expected=expected):
+                status_code, body = await self._deploy(service, overwrite=True, **kwargs)
+                self.assertEqual(status_code, 400)
+                self.assertIn(expected, body["detail"])
+                self.assertEqual(body["error"], body["detail"])
+        service.deploy_orchestrator.find_model_resource.assert_not_awaited()
+
+
+class FindModelResourceTest(unittest.IsolatedAsyncioTestCase):
+    def _orchestrator(self, responses: dict) -> tuple[DeployOrchestrator, list]:
+        requested: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested.append(request.url.path)
+            return responses.get(request.url.path, httpx.Response(404))
+
+        orchestrator = DeployOrchestrator(
+            operation_store=DeployOperationStore(),
+            k8s_client=KubernetesApiClient(),
+            resolve_k8s_auth=lambda: ("https://k8s", {}, False),
+            build_job_manifest=lambda **_: {},
+            build_delete_job_manifest=lambda **_: {},
+            build_deployment_manifest=lambda **_: {},
+            build_service_manifest=lambda **_: {},
+            kaniko_image="kaniko",
+            model_service_prefix="bentloy-model",
+            build_timeout_sec=1,
+            rollout_timeout_sec=1,
+            http_client_factory=lambda verify: httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ),
+        )
+        return orchestrator, requested
+
+    async def test_service_then_deployment(self) -> None:
+        service_path = "/api/v1/namespaces/ns/services/bentloy-model-x"
+        deployment_path = "/apis/apps/v1/namespaces/ns/deployments/bentloy-model-x"
+        metadata = {"name": "bentloy-model-x", "labels": {"bentloy.io/run-id": RUN_ID}}
+
+        orchestrator, requested = self._orchestrator({})
+        self.assertIsNone(await orchestrator.find_model_resource("ns", "bentloy-model-x"))
+        self.assertEqual(requested, [service_path, deployment_path])
+
+        orchestrator, _ = self._orchestrator(
+            {deployment_path: httpx.Response(200, json={"metadata": metadata})}
+        )
+        self.assertEqual(await orchestrator.find_model_resource("ns", "bentloy-model-x"), metadata)
+
+        orchestrator, _ = self._orchestrator({service_path: httpx.Response(403, text="forbidden")})
+        with self.assertRaisesRegex(RuntimeError, "403"):
+            await orchestrator.find_model_resource("ns", "bentloy-model-x")
 
 
 if __name__ == "__main__":

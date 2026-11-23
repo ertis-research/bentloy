@@ -428,6 +428,50 @@ class CommandsTest(unittest.TestCase):
         self.assertEqual(calls[1][1]["run_id"], run_id)
         self.assertEqual(calls[1][1]["page"], 1)
 
+    def test_deploy_overwrite_flag_is_sent(self) -> None:
+        calls = []
+
+        def fake_call(url, endpoint, payload, retries=0):
+            calls.append(payload)
+            return {"operation_id": "op1", "deployed_name": "m", "image_ref": "img"}
+
+        @contextlib.contextmanager
+        def fake_connection(config, url):
+            yield "http://gw"
+
+        parser = bentloy.build_parser()
+        with mock.patch.object(bentloy, "gateway_connection", fake_connection), \
+                mock.patch.object(bentloy, "call_gateway", fake_call), \
+                contextlib.redirect_stdout(io.StringIO()):
+            bentloy.cmd_deploy(parser.parse_args(["deploy", "m", "--no-wait"]), make_config())
+            bentloy.cmd_deploy(parser.parse_args(["deploy", "m", "--overwrite", "--no-wait"]),
+                               make_config())
+        self.assertEqual([c["overwrite"] for c in calls], [False, True])
+
+    def test_deploy_conflict_shows_detail(self) -> None:
+        detail = ("'Churn V2' maps to bentloy-model-churn-v2 in namespace 'api-models', already "
+                  "used by run abc123. Use another name or overwrite=true.")
+        body = json.dumps({"error": detail, "detail": detail}).encode()
+
+        def conflict(*args, **kwargs):
+            raise bentloy.urllib.error.HTTPError(
+                "http://gw/deploy_model", 409, "Conflict", {}, io.BytesIO(body)
+            )
+
+        @contextlib.contextmanager
+        def fake_connection(config, url):
+            yield "http://gw"
+
+        args = bentloy.build_parser().parse_args(["deploy", "m", "--name", "Churn V2"])
+        with mock.patch.object(bentloy, "gateway_connection", fake_connection), \
+                mock.patch.object(bentloy.urllib.request, "urlopen", conflict), \
+                self.assertRaises(bentloy.CliError) as caught:
+            bentloy.cmd_deploy(args, make_config())
+        message = str(caught.exception)
+        self.assertIn(f"Deploy conflict: {detail}", message)
+        self.assertIn("--overwrite", message)
+        self.assertNotIn('"error"', message)
+
 
 if __name__ == "__main__":
     unittest.main()

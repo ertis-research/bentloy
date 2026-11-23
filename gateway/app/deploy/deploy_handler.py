@@ -17,6 +17,7 @@ from ..domain.helpers import (
     is_valid_registry_server,
     to_model_slug,
 )
+from ..domain.k8s_labels import EXPERIMENT_LABEL, EXPERIMENT_NAME_ANNOTATION, RUN_ID_LABEL
 from ..domain.types import DeployOperationRecord, DeployOperationRequest
 from .errors import MAX_ERROR_CHARS, truncate
 from .operation_store import DeployOperationStore
@@ -107,11 +108,14 @@ class DeployHandler:
         deployed_name: str = "",
         append_date: bool = False,
         experiment_name: str = "",
+        overwrite: bool = False,
     ) -> dict[str, Any]:
         """Validate input, enqueue a deploy operation, and trigger async execution.
 
         `model_name` is the base name of the deployment (slug, image, default
         `deployed_name`); `experiment_name` is the MLflow experiment the run belongs to.
+        Unless `overwrite` is true, a deployed_name whose resource already exists answers
+        409; a deploy still in progress for that resource answers 409 even with overwrite.
         Raises DeployRequestError when the request cannot be queued.
         """
 
@@ -187,6 +191,14 @@ class DeployHandler:
         if not is_valid_image_ref(base_image):
             raise DeployRequestError(f"Invalid base image '{base_image}'.", 500)
 
+        await self._check_conflicts(
+            namespace=namespace,
+            deployment_slug=deployment_slug,
+            resource_name=resource_name,
+            deployed_name=deployed_name,
+            overwrite=bool(overwrite),
+        )
+
         operation_id = self._build_operation_id()
         job_name = f"bentloy-build-{deployment_slug}"[:56].rstrip("-") + f"-{operation_id[-6:]}"
         job_name = re.sub(r"[^a-z0-9-]+", "-", job_name.lower()).strip("-")[:63].rstrip("-")
@@ -233,7 +245,13 @@ class DeployHandler:
             "request": request,
         }
 
-        await self.operation_store.add(operation)
+        # Atomic re-check: closes the gap with a concurrent request to this gateway that
+        # queued the same resource while we were reading Kubernetes.
+        active = await self.operation_store.add_if_no_active(operation)
+        if active is not None:
+            raise DeployRequestError(
+                self._in_progress_message(deployed_name, resource_name, active), 409
+            )
         asyncio.create_task(self.deploy_orchestrator.run_operation(operation_id))
 
         return {
@@ -248,6 +266,84 @@ class DeployHandler:
             "image_ref": target_image,
             "k8s_job": job_name,
         }
+
+    async def _check_conflicts(
+        self,
+        *,
+        namespace: str,
+        deployment_slug: str,
+        resource_name: str,
+        deployed_name: str,
+        overwrite: bool,
+    ) -> None:
+        """Reject (409) a deploy that would silently replace another one.
+
+        Names that differ but share a slug (`Churn_V2`, `churn v2`) map to the same
+        `<prefix>-<slug>` Service/Deployment, and `ensure_resource` patches existing
+        resources, so the earlier model would be replaced without notice.
+
+        There is a window between this check and the resources being applied (the build
+        takes minutes). Within this gateway it is closed by the operation store: an active
+        operation for the same resource blocks new ones, and `add_if_no_active` re-checks
+        atomically. What remains (several gateway replicas, or someone applying the
+        resources by hand during a build) is rare enough that a distributed lock is not
+        worth it.
+        """
+
+        active = await self.operation_store.find_active(namespace, deployment_slug)
+        if active is not None:
+            raise DeployRequestError(
+                self._in_progress_message(deployed_name, resource_name, active), 409
+            )
+        if overwrite:
+            return
+
+        try:
+            metadata = await self.deploy_orchestrator.find_model_resource(
+                namespace, resource_name
+            )
+        except Exception as exc:
+            raise DeployRequestError(
+                truncate(
+                    f"Could not check whether {resource_name} already exists in namespace "
+                    f"'{namespace}': {exc}"
+                ),
+                503,
+            ) from exc
+        if metadata is None:
+            return
+
+        labels = metadata.get("labels") or {}
+        annotations = metadata.get("annotations") or {}
+        run_id = labels.get(RUN_ID_LABEL) or ""
+        experiment = annotations.get(EXPERIMENT_NAME_ANNOTATION) or labels.get(EXPERIMENT_LABEL) or ""
+        raise DeployRequestError(
+            f"'{deployed_name}' maps to {resource_name} in namespace '{namespace}', "
+            f"already used by {self._describe_owner(run_id, experiment, 'an existing deployment')}. "
+            "Use another name or overwrite=true.",
+            409,
+        )
+
+    @staticmethod
+    def _describe_owner(run_id: str, experiment_name: str, fallback: str) -> str:
+        owner = f"run {run_id}" if run_id else fallback
+        if experiment_name:
+            owner += f" (experiment '{experiment_name}')"
+        return owner
+
+    def _in_progress_message(
+        self, deployed_name: str, resource_name: str, operation: DeployOperationRecord
+    ) -> str:
+        owner = self._describe_owner(
+            operation.get("run_id") or "",
+            operation.get("experiment_name") or "",
+            f"deployed_name '{operation.get('deployed_name')}'",
+        )
+        return (
+            f"'{deployed_name}' maps to {resource_name}, which has an operation in progress "
+            f"({operation['operation_id']}, status '{operation['status']}') for {owner}. "
+            "Wait until it finishes; overwrite=true cannot replace a deployment still in progress."
+        )
 
     async def deploy_status(self, operation_id: str) -> dict[str, Any]:
         """Return the latest status snapshot for a queued deployment operation."""

@@ -69,6 +69,21 @@ class KubernetesApiClient:
             return ""
         return response.text
 
+    async def get_resource(
+        self,
+        client: httpx.AsyncClient,
+        headers: dict[str, str],
+        resource_url: str,
+    ) -> dict[str, Any] | None:
+        """Return a Kubernetes resource as a dict, or None if it does not exist."""
+
+        response = await client.get(resource_url, headers=headers)
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise RuntimeError(f"Read failed ({response.status_code}): {response.text}")
+        return response.json()
+
     async def ensure_resource(
         self,
         client: httpx.AsyncClient,

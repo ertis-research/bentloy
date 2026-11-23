@@ -7,6 +7,19 @@ from typing import Any, Callable
 
 from ..domain.types import DeployOperationRecord
 
+# Statuses of an operation still acting on its model-service resources.
+ACTIVE_STATUSES = frozenset({"queued", "building", "pushing", "deploying", "deleting"})
+
+
+def _targets(operation: DeployOperationRecord, namespace: str, deployment_slug: str) -> bool:
+    """Return whether an operation deploys to `<prefix>-<deployment_slug>` in `namespace`."""
+
+    request = operation.get("request") or {}
+    return (
+        request.get("namespace") == namespace
+        and request.get("deployment_slug") == deployment_slug
+    )
+
 
 def _now_iso_utc() -> str:
     """Return the current UTC timestamp in ISO-8601 format."""
@@ -28,6 +41,43 @@ class DeployOperationStore:
         operation_id = operation["operation_id"]
         async with self._lock:
             self._operations[operation_id] = deepcopy(operation)
+
+    async def add_if_no_active(
+        self, operation: DeployOperationRecord
+    ) -> DeployOperationRecord | None:
+        """Store `operation` unless an active one targets the same resource.
+
+        Check and insert happen under one lock, so two concurrent requests in this
+        process cannot both queue a deploy of the same resource. Returns a copy of the
+        conflicting operation (and stores nothing), or None once stored.
+        """
+
+        request = operation["request"]
+        async with self._lock:
+            conflict = self._find_active(request["namespace"], request["deployment_slug"])
+            if conflict is not None:
+                return deepcopy(conflict)
+            self._operations[operation["operation_id"]] = deepcopy(operation)
+            return None
+
+    async def find_active(
+        self, namespace: str, deployment_slug: str
+    ) -> DeployOperationRecord | None:
+        """Return a copy of an active operation targeting the resource, if any."""
+
+        async with self._lock:
+            operation = self._find_active(namespace, deployment_slug)
+            return deepcopy(operation) if operation is not None else None
+
+    def _find_active(
+        self, namespace: str, deployment_slug: str
+    ) -> DeployOperationRecord | None:
+        for operation in self._operations.values():
+            if operation.get("status") in ACTIVE_STATUSES and _targets(
+                operation, namespace, deployment_slug
+            ):
+                return operation
+        return None
 
     async def get(self, operation_id: str) -> DeployOperationRecord | None:
         """Fetch a copy of an operation by id."""

@@ -104,10 +104,27 @@ Options:
 | `--replicas` | Model replicas |
 | `--model-uri` / `--run-id` | Explicit MLflow source instead of the registry |
 | `--experiment-name` | MLflow experiment of the run; lets `list_models` filter deployments by model |
+| `--overwrite` | Replace an existing deployment with the same name (see below) |
 | `--no-wait` | Return after queuing; follow with `python bentloy.py status <operation_id>` |
 
 Terminal statuses: `ready`, `failed` (intermediate: `queued`, `building`,
 `pushing`, `deploying`).
+
+**Name conflicts.** The deployed name becomes a slug (`Churn_V2`, `churn-v2` and
+`churn v2` are all `bentloy-model-churn-v2`). If that resource already exists, the deploy
+is rejected with `409` and the CLI prints which run and experiment use it:
+
+```
+Deploy conflict: 'Churn V2' maps to bentloy-model-churn-v2 in namespace 'api-models', already
+used by run 3f2a... (experiment 'Churn Prediction'). Use another name or overwrite=true.
+Pass --overwrite to replace it.
+```
+
+Choose another `--name`, or pass `--overwrite` to replace the existing model (automations
+calling it will start predicting with the new one). While a deploy or delete of that
+resource is still in progress the gateway answers `409` even with `--overwrite`: wait until
+it ends (`python bentloy.py status <operation_id>`). A name whose slug is empty or longer
+than 49 characters is rejected with `400`.
 
 ### Other model operations
 
@@ -169,6 +186,9 @@ curl -X POST "<gateway_url>/deploy_model" -H "Content-Type: application/json" \
 # One version (run) of an experiment:
 curl -X POST "<gateway_url>/deploy_model" -H "Content-Type: application/json" \
   -d '{"model_name": "churn_v2", "run_id": "<run_id>", "model_uri": "runs:/<run_id>/ludwig-model", "experiment_name": "<experiment>"}'
+# Replace an existing deployment with the same name (otherwise 409):
+curl -X POST "<gateway_url>/deploy_model" -H "Content-Type: application/json" \
+  -d '{"model_name": "tiny_demo_model", "deployed_name": "tiny_demo_prod", "overwrite": true}'
 curl -X POST "<gateway_url>/deploy_status" -H "Content-Type: application/json" \
   -d '{"operation_id": "<operation_id>"}'
 ```
@@ -220,7 +240,16 @@ several minutes. Two settings keep it down (both on by default):
 2. Check the Secret exists: `kubectl -n <ns> get secret <MODEL_REGISTRY_SECRET>`.
 3. Verify push permissions for `<REGISTRY_SERVER>[/<REGISTRY_NAMESPACE>]`.
 
-### 7.4 A model image fails to build
+### 7.4 Deploy rejected with `409` or `503`
+
+- `409 ... already used by run ...`: another model is deployed under the same slug. Use
+  another `--name` or `--overwrite` (see section 4).
+- `409 ... has an operation in progress`: wait for that operation to end; `--overwrite`
+  does not help here.
+- `503 Could not check whether bentloy-model-<slug> already exists`: the gateway could not
+  read the Kubernetes API. Check its RBAC allows `get` on services and deployments.
+
+### 7.5 A model image fails to build
 
 Read the Kaniko Job logs (`python bentloy.py status <operation_id>` shows the error).
 If a library is missing at runtime, make sure the model was logged to MLflow with its

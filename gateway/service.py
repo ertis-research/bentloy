@@ -171,13 +171,16 @@ class GatewayService:
         deployed_name: str = "",
         append_date: bool = False,
         experiment_name: str = "",
+        overwrite: bool = False,
         ctx: bentoml.Context = None,
     ) -> dict[str, Any]:
         """Queue a model deployment operation managed by the gateway.
 
         `model_name` names the deployment; `experiment_name` is the MLflow experiment.
-        Invalid requests answer with a 4xx (5xx for gateway misconfiguration) and
-        {"error": msg, "detail": msg}.
+        A deployed_name whose `bentloy-model-<slug>` already exists answers 409 unless
+        `overwrite` is true; a deploy in progress for it answers 409 regardless.
+        Invalid requests answer with a 4xx (5xx for gateway misconfiguration or when
+        Kubernetes cannot be read) and {"error": msg, "detail": msg}.
         """
 
         try:
@@ -194,6 +197,7 @@ class GatewayService:
                 deployed_name=deployed_name,
                 append_date=append_date,
                 experiment_name=experiment_name,
+                overwrite=overwrite,
             )
         except DeployRequestError as exc:
             if ctx is not None:

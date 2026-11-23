@@ -101,8 +101,45 @@ and is returned only by `/deploy_status`, to keep `list_models` light.
 ### `/deploy_model` errors
 
 Requests that cannot be queued answer with an HTTP error and `{"error": msg, "detail": msg}`:
-`400` invalid parameters, `403` automatic deploy disabled, `500` gateway misconfiguration
-(registry / base image settings).
+
+| Code | When |
+|---|---|
+| `400` | Invalid parameters, including a `deployed_name` whose slug is empty or whose resource name `bentloy-model-<slug>` exceeds 63 characters |
+| `403` | Automatic deploy disabled |
+| `409` | The resource name is already in use (see below) |
+| `500` | Gateway misconfiguration (registry / base image settings) |
+| `503` | The gateway could not read the Kubernetes API to check for an existing deployment |
+
+### `/deploy_model` conflicts and `overwrite`
+
+`deployed_name` is normalized to a slug (`Churn_V2`, `churn-v2` and `churn v2` all give
+`churn-v2`) and the model is deployed as the Deployment and Service `bentloy-model-<slug>`.
+Different names with the same slug therefore share one resource. Before queuing anything
+(before the build Job), the handler checks the target namespace:
+
+1. **Operation in progress** for the same resource (status `queued`, `building`, `pushing`,
+   `deploying` or `deleting`): `409`, **even with `overwrite=true`**. A deployment that is
+   still being built or deleted cannot be replaced.
+2. **Existing Service or Deployment** named `bentloy-model-<slug>`: `409` unless
+   `overwrite=true` is passed. The `detail` names the requested `deployed_name`, the
+   resource, and the `run_id` / `experiment_name` of the existing deployment, read from its
+   `bentloy.io/run-id` label and `bentloy.io/experiment-name` annotation when present:
+
+   ```
+   'Churn V2' maps to bentloy-model-churn-v2 in namespace 'api-models', already used by run
+   3f2a... (experiment 'Churn Prediction'). Use another name or overwrite=true.
+   ```
+
+With `overwrite=true` (default `false`) and nothing in progress, the existing Deployment and
+Service are patched in place, as all deploys did before this check existed.
+
+The check and the creation of the resources are not atomic (the build takes minutes). Within
+one gateway the operation store closes the gap: an active operation blocks new deploys of the
+same resource and the store re-checks atomically when queuing. Several gateway replicas, or
+resources applied by hand during a build, can still race; no distributed lock is used.
+
+> **Behaviour change:** before this check, a deploy whose slug matched an existing model
+> replaced it silently. Clients that relied on that must now pass `overwrite=true`.
 
 ## 4) Environment and config
 
