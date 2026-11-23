@@ -7,6 +7,7 @@ from ..domain.k8s_labels import (
     EXPERIMENT_LABEL,
     EXPERIMENT_NAME_ANNOTATION,
     MODEL_URI_ANNOTATION,
+    OPERATION_ID_ANNOTATION,
     RUN_ID_LABEL,
 )
 from .template_loader import load_template_yaml
@@ -52,11 +53,14 @@ def build_deployment_manifest(
     run_id: str = "",
     source_model_uri: str = "",
     experiment_name: str = "",
+    operation_id: str = "",
 ) -> dict[str, Any]:
     """Render and customize a Deployment manifest for one model-service instance.
 
     `model_uri` is the path the container loads (MODEL_URI env); `source_model_uri`
     is the MLflow URI the image was built from (stored as an annotation).
+    `operation_id` marks which deploy operation owns the resource (Deployment
+    metadata only, not the pod template).
     """
 
     manifest = load_template_yaml("deployment.yaml")
@@ -69,7 +73,7 @@ def build_deployment_manifest(
     manifest["metadata"]["name"] = deploy_name
     manifest["metadata"]["namespace"] = namespace
     manifest["metadata"]["labels"] = labels
-    manifest["metadata"]["annotations"] = dict(annotations)
+    manifest["metadata"]["annotations"] = {**annotations, OPERATION_ID_ANNOTATION: operation_id}
 
     spec = manifest["spec"]
     spec["replicas"] = replicas

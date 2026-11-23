@@ -180,7 +180,9 @@ class GatewayService:
         A deployed_name whose `bentloy-model-<slug>` already exists answers 409 unless
         `overwrite` is true; a deploy in progress for it answers 409 regardless.
         Invalid requests answer with a 4xx (5xx for gateway misconfiguration or when
-        Kubernetes cannot be read) and {"error": msg, "detail": msg}.
+        Kubernetes cannot be read) and {"error": msg, "detail": msg}, plus structured
+        fields for name conflicts (409: `conflict`, `resource_name`, ...) and invalid
+        names (400: `invalid_field`, `max_length`).
         """
 
         try:
@@ -202,7 +204,7 @@ class GatewayService:
         except DeployRequestError as exc:
             if ctx is not None:
                 ctx.response.status_code = exc.status_code
-            return {"error": exc.message, "detail": exc.message}
+            return {**exc.extra, "error": exc.message, "detail": exc.message}
 
     @bentoml.api
     async def deploy_status(self, operation_id: str) -> dict[str, Any]:
@@ -264,12 +266,12 @@ class GatewayService:
             return {"error": exc.message, "detail": exc.message}
 
     @bentoml.api
-    async def delete_operation(self, operation_id: str):
-        """Delete oepration from system"""
-        await self.deploy_handler.delete_operation(operation_id)
+    async def delete_operation(self, operation_id: str) -> dict[str, Any]:
+        """Delete an operation, plus the resources and image it owns (in the background)."""
+        return await self.deploy_handler.delete_operation(operation_id)
 
     @bentoml.api
-    async def delete_model(self, service_name: str):
-        """Delete model from system"""
-        await self.deploy_handler.delete_model(service_name)
+    async def delete_model(self, service_name: str) -> dict[str, Any]:
+        """Delete a model's Deployment, Service and (if no one else uses it) image."""
+        return await self.deploy_handler.delete_model(service_name)
     

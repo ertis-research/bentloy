@@ -138,7 +138,9 @@ python bentloy.py delete tiny_demo_prod     # or the service name: bentloy-model
 `predict` input forms: `column=value` pairs, a JSON object of columns, a JSON list
 of features, or `--file input.json` (see 5.2 for the formats).
 
-`delete` removes the Deployment, the Service and the model image from the registry.
+`delete` removes the Deployment, the Service and the model image from the registry. The
+image is kept when another deployment (or a deploy in progress) uses it: the same model
+and run deployed under two names share one image. Only `bentloy-model-*` names are accepted.
 
 ### Reaching the gateway
 

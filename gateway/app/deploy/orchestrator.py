@@ -1,15 +1,14 @@
 """Asynchronous deployment orchestration against the Kubernetes API."""
 
 import asyncio
+import logging
 from typing import Any, Callable
-import re
-from kubernetes_asyncio import client, config
-from kubernetes_asyncio.client.exceptions import ApiException
-from kubernetes_asyncio.config.config_exception import ConfigException
 
 import httpx
 
-from ..domain.types import DeployOperationRequest
+from ..domain.helpers import to_model_slug
+from ..domain.k8s_labels import OPERATION_ID_ANNOTATION
+from ..domain.types import DeployOperationRecord, DeployOperationRequest
 from ..kubernetes.client import KubernetesApiClient
 from .errors import (
     MAX_ERROR_CHARS,
@@ -19,6 +18,8 @@ from .errors import (
     truncate,
 )
 from .operation_store import DeployOperationStore
+
+logger = logging.getLogger("bentoml.gateway.deploy")
 
 
 def _default_http_client_factory(verify: str | bool) -> httpx.AsyncClient:
@@ -223,6 +224,7 @@ class DeployOrchestrator:
                     run_id=run_id,
                     source_model_uri=model_uri,
                     experiment_name=experiment_name,
+                    operation_id=operation_id,
                 )
                 service_manifest = self.build_service_manifest(
                     namespace=namespace,
@@ -231,6 +233,7 @@ class DeployOrchestrator:
                     run_id=run_id,
                     source_model_uri=model_uri,
                     experiment_name=experiment_name,
+                    operation_id=operation_id,
                 )
 
                 deploy_name = f"{self.model_service_prefix}-{deployment_slug}"
@@ -289,121 +292,166 @@ class DeployOrchestrator:
                 error_log=message if len(message) > MAX_ERROR_CHARS else None,
             )
 
-    async def _delete_k8s_resources(self, deployed_name: str, job_name:str | None, namespace: str) -> None:
-        """Helper to delete Job, Deployment, and Pods safely."""
-        
-        # # 1. Load the Kubernetes configuration
-        # try:
-        #     # Try loading the in-cluster config (when running inside a Kubernetes Pod)
-        #     config.load_incluster_config()
-        # except ConfigException:
-        #     # Fallback to local kubeconfig (when testing locally on your laptop)
-        #     await config.load_kube_config()
+    def _model_urls(self, base_url: str, namespace: str, resource_name: str) -> tuple[str, str]:
+        """Return the (Deployment, Service) URLs of a model-service resource."""
 
-        # # 2. Initialize the client and APIs
-        # async with client.ApiClient() as api_client:
-        #     apps_v1 = client.AppsV1Api(api_client)
-        #     batch_v1 = client.BatchV1Api(api_client)
+        return (
+            f"{base_url}/apis/apps/v1/namespaces/{namespace}/deployments/{resource_name}",
+            f"{base_url}/api/v1/namespaces/{namespace}/services/{resource_name}",
+        )
 
-        #     # 3. Delete Deployment
-        #     try:
-        #         await apps_v1.delete_namespaced_deployment(
-        #             name=deployed_name, 
-        #             namespace=namespace
-        #         )
-        #         await apps_v1
-        #     except ApiException as e:
-        #         # 404 means it's already deleted/gone, which is fine
-        #         if e.status != 404: 
-        #             raise
+    @staticmethod
+    def _deployment_images(deployment: dict[str, Any]) -> set[str]:
+        pod_spec = deployment.get("spec", {}).get("template", {}).get("spec", {})
+        containers = pod_spec.get("containers", []) + pod_spec.get("initContainers", [])
+        return {container.get("image", "") for container in containers}
 
-        #     # 4. Delete Job
-        #     try:
-        #         if job_name: 
-        #             await batch_v1.delete_namespaced_job(
-        #                 name=job_name, 
-        #                 namespace=namespace,
-        #                 propagation_policy="Background" # Ensures spawned pods are also deleted
-        #             )
-        #     except ApiException as e:
-        #         if e.status != 404: 
-        #             raise
-        #     # (Optional) Delete specific Pods if they aren't bound to the Job/Deployment
-        #     # Usually K8s garbage collection handles pods tied to Jobs/Deployments automatically.
+    async def _image_user(
+        self,
+        client: httpx.AsyncClient,
+        base_url: str,
+        headers: dict[str, str],
+        namespace: str,
+        image_ref: str,
+        exclude_deployment: str = "",
+        exclude_operation_id: str = "",
+    ) -> str | None:
+        """Describe who else uses `image_ref`, or None if nobody does.
 
-        try:
-            config.load_incluster_config()
-        except ConfigException:
-            await config.load_kube_config()
+        The image name is `model-<model_name slug>:v<version>-r<run>`, independent of the
+        deployed name, so several deployments (and a deploy still in progress) can share it.
+        Deleting it would break them on their next pod start. Checks the Deployments of
+        `namespace` (one LIST call) and the in-memory operations.
+        """
 
-        # 2. Initialize the client and APIs
-        async with client.ApiClient() as api_client:
-            apps_v1 = client.AppsV1Api(api_client)
-            batch_v1 = client.BatchV1Api(api_client)
-            core_v1 = client.CoreV1Api(api_client)
+        deployments_url = f"{base_url}/apis/apps/v1/namespaces/{namespace}/deployments"
+        for deployment in await self.k8s_client.list_resources(client, headers, deployments_url):
+            metadata = deployment.get("metadata", {})
+            name = metadata.get("name", "")
+            if name == exclude_deployment or metadata.get("deletionTimestamp"):
+                continue
+            if image_ref in self._deployment_images(deployment):
+                return f"Deployment {name}"
 
-            # 3. Delete Deployment
-            try:
-                await apps_v1.delete_namespaced_deployment(
-                    name=deployed_name, 
-                    namespace=namespace
-                )
-            except ApiException as e:
-                if e.status != 404: raise
+        operation = await self.operation_store.find_deploying_image(
+            image_ref, exclude_operation_id=exclude_operation_id
+        )
+        if operation is not None:
+            return f"operation {operation['operation_id']} ({operation['status']})"
+        return None
 
-            # 4. Delete Job
-            try:
-                if job_name: 
-                    await batch_v1.delete_namespaced_job(
-                        name=job_name, 
+    async def _delete_image_unless_used(
+        self,
+        client: httpx.AsyncClient,
+        base_url: str,
+        headers: dict[str, str],
+        *,
+        namespace: str,
+        image_ref: str,
+        deployment_slug: str,
+        registry_secret: str,
+        insecure_registry_tls: bool,
+        exclude_deployment: str = "",
+        exclude_operation_id: str = "",
+    ) -> str:
+        """Delete `image_ref` from the registry unless something else uses it; return a note."""
+
+        user = await self._image_user(
+            client,
+            base_url,
+            headers,
+            namespace,
+            image_ref,
+            exclude_deployment=exclude_deployment,
+            exclude_operation_id=exclude_operation_id,
+        )
+        if user:
+            return f"Image {image_ref} kept: still used by {user}."
+        await self._delete_registry_image(
+            image_ref=image_ref,
+            namespace=namespace,
+            deployment_slug=deployment_slug,
+            registry_secret=registry_secret,
+            insecure_registry_tls=insecure_registry_tls,
+        )
+        return f"Image {image_ref} deleted."
+
+    @staticmethod
+    def _owner_operation(resource: dict[str, Any] | None) -> str | None:
+        if resource is None:
+            return None
+        annotations = resource.get("metadata", {}).get("annotations") or {}
+        return annotations.get(OPERATION_ID_ANNOTATION) or None
+
+    async def delete_operation_resources(
+        self,
+        operation: DeployOperationRecord,
+        registry_secret: str,
+        insecure_registry_tls: bool,
+    ) -> list[str]:
+        """Delete what one deploy operation created; return notes on what was done.
+
+        - Deployment and Service `<prefix>-<deployment_slug>`: only if their
+          `bentloy.io/operation-id` annotation is this operation. Otherwise they belong to
+          another deploy (e.g. a later overwrite, or resources from before the annotation
+          existed) and are kept.
+        - The build Job.
+        - The image, unless another Deployment or a deploy in progress uses it.
+        """
+
+        operation_id = operation["operation_id"]
+        request = operation.get("request") or {}
+        namespace = request.get("namespace") or operation.get("namespace") or ""
+        deployment_slug = request.get("deployment_slug") or to_model_slug(
+            operation.get("deployed_name") or ""
+        )
+        resource_name = f"{self.model_service_prefix}-{deployment_slug}" if deployment_slug else ""
+        notes: list[str] = []
+        deleted_deployment = ""
+
+        base_url, headers, verify = self.resolve_k8s_auth()
+        async with self.http_client_factory(verify) as client:
+            if resource_name:
+                deployment_url, service_url = self._model_urls(base_url, namespace, resource_name)
+                for kind, url in (("Deployment", deployment_url), ("Service", service_url)):
+                    resource = await self.k8s_client.get_resource(client, headers, url)
+                    if resource is None:
+                        continue
+                    owner = self._owner_operation(resource)
+                    if owner != operation_id:
+                        notes.append(
+                            f"{kind} {resource_name} kept: owned by "
+                            f"{owner or 'a deploy without operation id'}."
+                        )
+                        continue
+                    await self.k8s_client.delete_resource(client, headers, url)
+                    notes.append(f"{kind} {resource_name} deleted.")
+                    if kind == "Deployment":
+                        deleted_deployment = resource_name
+
+            job_name = operation.get("k8s_job")
+            if job_name:
+                job_url = f"{base_url}/apis/batch/v1/namespaces/{namespace}/jobs/{job_name}"
+                if await self.k8s_client.delete_resource(client, headers, job_url):
+                    notes.append(f"Job {job_name} deleted.")
+
+            image_ref = operation.get("image_ref")
+            if image_ref and deployment_slug:
+                notes.append(
+                    await self._delete_image_unless_used(
+                        client,
+                        base_url,
+                        headers,
                         namespace=namespace,
-                        propagation_policy="Background"
+                        image_ref=image_ref,
+                        deployment_slug=deployment_slug,
+                        registry_secret=registry_secret,
+                        insecure_registry_tls=insecure_registry_tls,
+                        exclude_deployment=deleted_deployment,
+                        exclude_operation_id=operation_id,
                     )
-            except ApiException as e:
-                if e.status != 404: raise
-            
-            # 5. Delete Orphaned Pods Safely via Regex
-            try:
-                pod_list = await core_v1.list_namespaced_pod(namespace=namespace)
-                
-                # Regex pattern explained:
-                # ^{deployed_name}        -> Must start EXACTLY with deployed_name
-                # (?:-[a-f0-9]{7,12})?    -> OPTIONAL ReplicaSet hex hash (Deployments have this, Jobs don't)
-                # -[a-z0-9]{5}$           -> EXACTLY one 5-character Kubernetes pod hash at the end
-                safe_deploy_pattern = re.compile(rf"^{re.escape(deployed_name)}(?:-[a-f0-9]{{7,12}})?-[a-z0-9]{{5}}$")
-                
-                if job_name:
-                    safe_job_pattern = re.compile(rf"^{re.escape(job_name)}-[a-z0-9]{{5}}$")
-                else:
-                    safe_job_pattern = None
-
-                for pod in pod_list.items:
-                    pod_name = pod.metadata.name
-                    
-                    # Check if the pod name matches the safe regex patterns
-                    is_match = False
-                    if safe_deploy_pattern.match(pod_name):
-                        is_match = True
-                    elif safe_job_pattern and safe_job_pattern.match(pod_name):
-                        is_match = True
-
-                    # Also gracefully handle exact matches if a bare pod was created
-                    elif pod_name in (deployed_name, job_name):
-                        is_match = True
-
-                    if is_match:
-                        try:
-                            await core_v1.delete_namespaced_pod(
-                                name=pod_name,
-                                namespace=namespace
-                            )
-                            print(f"Cleaned up orphaned pod: {pod_name}")
-                        except ApiException as pod_e:
-                            if pod_e.status != 404:
-                                raise
-
-            except ApiException as list_e:
-                raise
+                )
+        return notes
 
     async def _delete_registry_image(
         self, 
@@ -478,84 +526,55 @@ class DeployOrchestrator:
             else:
                 raise RuntimeError("Image Deletion Job timeout.")
 
-    async def delete_deployed_model(self, service_name, namespace):
-        # namespace = getattr(self, "model_namespace", "default")
-                
-        # Derive the deployment slug for the crane job name
+    async def delete_deployed_model(self, service_name: str, namespace: str) -> dict[str, Any]:
+        """Delete a deployed model: its Deployment, Service and (if unused) image.
+
+        Only `<prefix>-*` names are accepted, so this endpoint cannot remove other
+        workloads of the namespace (e.g. the gateway itself).
+        """
+
         prefix = f"{self.model_service_prefix}-"
-        deployment_slug = service_name.replace(prefix, "") if service_name.startswith(prefix) else service_name
+        if not service_name.startswith(prefix) or service_name == prefix:
+            return {
+                "status": "error",
+                "message": f"'{service_name}' is not a model service (expected '{prefix}<name>').",
+            }
+        deployment_slug = service_name[len(prefix):]
 
-        image_ref = None
-        # Always use the gateway's configured MODEL_REGISTRY_SECRET to delete the image: the
-        # Deployment's pull secret may be stale or point to another registry project.
-        registry_secret = self.registry_secret
-        
-        try:
-            config.load_incluster_config()
-        except ConfigException:
-            await config.load_kube_config()
+        base_url, headers, verify = self.resolve_k8s_auth()
+        async with self.http_client_factory(verify) as client:
+            deployment_url, service_url = self._model_urls(base_url, namespace, service_name)
+            deployment = await self.k8s_client.get_resource(client, headers, deployment_url)
+            images = sorted(self._deployment_images(deployment)) if deployment else []
 
-        async with client.ApiClient() as api_client:
-            apps_v1 = client.AppsV1Api(api_client)
-            core_v1 = client.CoreV1Api(api_client)
+            notes = []
+            for kind, url in (("Deployment", deployment_url), ("Service", service_url)):
+                if await self.k8s_client.delete_resource(client, headers, url):
+                    notes.append(f"{kind} {service_name} deleted.")
 
-            # 2. Discover Metadata BEFORE deleting the K8s resources
-            try:
-                # Read the deployment to get image_ref and secret
-                deployment = await apps_v1.read_namespaced_deployment(name=service_name, namespace=namespace)
-                
-                # Extract the image reference
-                if deployment.spec.template.spec.containers:
-                    image_ref = deployment.spec.template.spec.containers[0].image
-                
-            except ApiException as e:
-                if e.status == 404:
-                    print(f"Deployment {service_name} not found. Proceeding with cleanup anyway.")
-                else:
-                    raise Exception(f"Failed to read Deployment from K8s API: {str(e)}")
+            for image_ref in images:
+                try:
+                    notes.append(
+                        await self._delete_image_unless_used(
+                            client,
+                            base_url,
+                            headers,
+                            namespace=namespace,
+                            image_ref=image_ref,
+                            deployment_slug=deployment_slug,
+                            registry_secret=self.registry_secret,
+                            insecure_registry_tls=self.insecure_registry_tls_default,
+                            exclude_deployment=service_name,
+                        )
+                    )
+                except Exception as img_err:
+                    logger.warning("Failed to delete registry image %s: %s", image_ref, img_err)
+                    return {
+                        "status": "partial_success",
+                        "message": " ".join(notes)
+                        + f" Registry image cleanup failed: {img_err}",
+                    }
 
-            # 3. Call the robust cleanup helper we just built!
-            # Since we only have `service_name` (and no operation record), we don't definitively 
-            # know the Kaniko build job name. Passing None is safe, as K8s Jobs usually have TTLs, 
-            # and our safe regex cleanup will catch the Deployment pods perfectly.
-            # If your jobs follow a strict naming convention (e.g., f"build-{service_name}"), you can pass it.
-            job_name = None  
-            
-            await self._delete_k8s_resources(
-                deployed_name=service_name, 
-                job_name=job_name, 
-                namespace=namespace
-            )
-
-            # 4. Delete the associated K8s Service (which routes traffic to the model)
-            try:
-                await core_v1.delete_namespaced_service(name=service_name, namespace=namespace)
-                print(f"Deleted K8s Service: {service_name}")
-            except ApiException as e:
-                if e.status != 404: 
-                    raise
-
-        # 5. Delete the Image from the Registry (using the Crane helper)
-        if image_ref:
-            print(f"Triggering registry deletion for: {image_ref}")
-            try:
-                await self._delete_registry_image(
-                    image_ref=image_ref,
-                    namespace=namespace,
-                    deployment_slug=deployment_slug,
-                    registry_secret=registry_secret,
-                    insecure_registry_tls=self.insecure_registry_tls_default,
-                )
-            except Exception as img_err:
-                print(f"Failed to delete registry image: {img_err}")
-                return {
-                    "status": "partial_success", 
-                    "message": f"K8s resources deleted, but registry image cleanup failed: {img_err}"
-                }
-        else:
-            print("No image_ref found. Skipping registry deletion.")
-
-        return {
-            "status": "success", 
-            "message": f"Model {service_name} and its K8s/Registry resources were successfully deleted."
-        }
+        if not notes:
+            return {"status": "error", "message": f"Model {service_name} not found."}
+        return {"status": "success", "message": " ".join(notes)}

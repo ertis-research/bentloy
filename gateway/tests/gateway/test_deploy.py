@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 
+from gateway.app.deploy.deploy_handler import CONFLICT_EXISTS, CONFLICT_IN_PROGRESS
 from gateway.app.deploy.operation_store import DeployOperationStore
 from gateway.app.deploy.orchestrator import DeployOrchestrator
 from gateway.app.domain.types import DeployOperationRecord, DeployOperationRequest
@@ -617,6 +618,11 @@ class GatewayDeployConflictTest(unittest.IsolatedAsyncioTestCase):
         for expected in ("'Churn V2'", "bentloy-model-churn-v2", RUN_ID, "'Churn Prediction'",
                          "overwrite=true"):
             self.assertIn(expected, body["detail"])
+        self.assertEqual(body["conflict"], CONFLICT_EXISTS)
+        self.assertEqual(body["conflict"], "exists")
+        self.assertEqual(body["resource_name"], "bentloy-model-churn-v2")
+        self.assertEqual(body["run_id"], RUN_ID)
+        self.assertEqual(body["experiment_name"], "Churn Prediction")
         self.assertNotIn("operation_id", body)
         self.assertEqual(await service.operation_store.list_summaries(), [])
 
@@ -625,6 +631,24 @@ class GatewayDeployConflictTest(unittest.IsolatedAsyncioTestCase):
         status_code, body = await self._deploy(service, deployed_name="churn-v2")
         self.assertEqual(status_code, 409)
         self.assertIn("an existing deployment", body["detail"])
+        self.assertEqual(body["error"], body["detail"])
+        self.assertEqual(body["conflict"], "exists")
+        self.assertEqual(body["resource_name"], "bentloy-model-churn-v2")
+        self.assertIn("run_id", body)
+        self.assertIsNone(body["run_id"])
+        self.assertIn("experiment_name", body)
+        self.assertIsNone(body["experiment_name"])
+
+        # Keys present but empty (as the manifests write them when unknown) are null too.
+        service.deploy_orchestrator.find_model_resource.return_value = _existing_service(
+            run_id="", experiment_name=""
+        )
+        service.deploy_orchestrator.find_model_resource.return_value["labels"].pop(
+            "bentloy.io/experiment"
+        )
+        _, body = await self._deploy(service, deployed_name="churn-v2")
+        self.assertIsNone(body["run_id"])
+        self.assertIsNone(body["experiment_name"])
 
     async def test_names_with_the_same_slug_conflict(self) -> None:
         service = self._service()
@@ -666,6 +690,12 @@ class GatewayDeployConflictTest(unittest.IsolatedAsyncioTestCase):
                     for expected in (first["operation_id"], f"'{status}'", RUN_ID,
                                      "'Churn Prediction'", "in progress"):
                         self.assertIn(expected, body["detail"])
+                    self.assertEqual(body["error"], body["detail"])
+                    self.assertEqual(body["conflict"], CONFLICT_IN_PROGRESS)
+                    self.assertEqual(body["conflict"], "in_progress")
+                    self.assertEqual(body["resource_name"], "bentloy-model-churn-v2")
+                    self.assertEqual(body["operation_id"], first["operation_id"])
+                    self.assertEqual(body["status"], status)
 
         # Other namespaces and finished operations do not block.
         status_code, body = await self._deploy(
@@ -693,6 +723,7 @@ class GatewayDeployConflictTest(unittest.IsolatedAsyncioTestCase):
         status_code, body = await self._deploy(service, deployed_name="Churn V2")
         self.assertEqual(status_code, 503)
         self.assertIn("forbidden", body["detail"])
+        self.assertEqual(set(body), {"error", "detail"})
         self.assertEqual(await service.operation_store.list_summaries(), [])
 
     async def test_empty_or_too_long_slug_answers_400(self) -> None:
@@ -707,7 +738,25 @@ class GatewayDeployConflictTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(status_code, 400)
                 self.assertIn(expected, body["detail"])
                 self.assertEqual(body["error"], body["detail"])
+                self.assertEqual(body["invalid_field"], "deployed_name")
+                # 63 - len("bentloy-model-")
+                self.assertEqual(body["max_length"], 49)
         service.deploy_orchestrator.find_model_resource.assert_not_awaited()
+
+    async def test_max_length_follows_the_service_prefix(self) -> None:
+        service = self._service()
+        service.deploy_handler.model_service_prefix = "m"
+        status_code, body = await self._deploy(service, deployed_name="a" * 61)
+        self.assertEqual(status_code, 200, body)
+        status_code, body = await self._deploy(service, deployed_name="b" * 62)
+        self.assertEqual(status_code, 400)
+        self.assertEqual(body["max_length"], 61)
+
+    async def test_other_validation_errors_have_no_structured_fields(self) -> None:
+        service = self._service()
+        status_code, body = await self._deploy(service, replicas=0)
+        self.assertEqual(status_code, 400)
+        self.assertEqual(set(body), {"error", "detail"})
 
 
 class FindModelResourceTest(unittest.IsolatedAsyncioTestCase):

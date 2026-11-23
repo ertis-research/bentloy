@@ -2,6 +2,7 @@
 
 from typing import Any
 
+from ..domain.k8s_labels import OPERATION_ID_ANNOTATION
 from .deployment_manifest import build_model_metadata
 from .template_loader import load_template_yaml
 
@@ -13,6 +14,7 @@ def build_service_manifest(
     run_id: str = "",
     source_model_uri: str = "",
     experiment_name: str = "",
+    operation_id: str = "",
 ) -> dict[str, Any]:
     """Render and customize a Service manifest for one model-service instance."""
 
@@ -26,7 +28,7 @@ def build_service_manifest(
     manifest["metadata"]["name"] = service_name
     manifest["metadata"]["namespace"] = namespace
     manifest["metadata"]["labels"] = labels
-    manifest["metadata"]["annotations"] = annotations
+    manifest["metadata"]["annotations"] = {**annotations, OPERATION_ID_ANNOTATION: operation_id}
     manifest["spec"]["selector"] = selector_labels
 
     return manifest

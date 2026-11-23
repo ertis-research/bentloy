@@ -84,6 +84,39 @@ class KubernetesApiClient:
             raise RuntimeError(f"Read failed ({response.status_code}): {response.text}")
         return response.json()
 
+    async def list_resources(
+        self,
+        client: httpx.AsyncClient,
+        headers: dict[str, str],
+        list_url: str,
+    ) -> list[dict[str, Any]]:
+        """Return the items of a Kubernetes list endpoint."""
+
+        response = await client.get(list_url, headers=headers)
+        if response.status_code != 200:
+            raise RuntimeError(f"List failed ({response.status_code}): {response.text}")
+        return response.json().get("items", [])
+
+    async def delete_resource(
+        self,
+        client: httpx.AsyncClient,
+        headers: dict[str, str],
+        resource_url: str,
+    ) -> bool:
+        """Delete a resource and its dependents (background). False if it did not exist."""
+
+        response = await client.request(
+            "DELETE",
+            resource_url,
+            headers=headers,
+            json={"propagationPolicy": "Background"},
+        )
+        if response.status_code == 404:
+            return False
+        if response.status_code not in {200, 202}:
+            raise RuntimeError(f"Delete failed ({response.status_code}): {response.text}")
+        return True
+
     async def ensure_resource(
         self,
         client: httpx.AsyncClient,

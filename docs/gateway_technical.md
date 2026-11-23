@@ -55,6 +55,8 @@ Gateway keeps these endpoints:
 - `POST /batch_predict`
 - `POST /health`
 - `POST /list_models`
+- `POST /delete_model`
+- `POST /delete_operation`
 
 Compatibility objective remains: no payload/response contract break relative to the refactor baseline.
 
@@ -110,6 +112,26 @@ Requests that cannot be queued answer with an HTTP error and `{"error": msg, "de
 | `500` | Gateway misconfiguration (registry / base image settings) |
 | `503` | The gateway could not read the Kubernetes API to check for an existing deployment |
 
+`error` and `detail` are always present (same text, meant for people, the CLI and logs).
+Clients should tell the cases apart by these extra fields, not by the text:
+
+| Answer | Extra fields |
+|---|---|
+| `409` name in use | `conflict: "exists"`, `resource_name`, `run_id`, `experiment_name` (`null` when the existing resource has no `bentloy.io/run-id` label / `bentloy.io/experiment-name` annotation) |
+| `409` operation in progress | `conflict: "in_progress"`, `resource_name`, `operation_id`, `status` |
+| `400` invalid `deployed_name` (empty slug or too long) | `invalid_field: "deployed_name"`, `max_length` (longest valid slug: `63 - len(MODEL_SERVICE_PREFIX) - 1`, `49` with the default `bentloy-model`) |
+| Other `400`, `403`, `500`, `503` | none |
+
+```json
+{"error": "...", "detail": "...", "conflict": "exists",
+ "resource_name": "bentloy-model-churn-v2",
+ "run_id": "3f2a9c1d8e7b4a6f9c0d1e2f3a4b5c6d", "experiment_name": "Churn Prediction"}
+{"error": "...", "detail": "...", "conflict": "in_progress",
+ "resource_name": "bentloy-model-churn-v2", "operation_id": "op_20261123101500_a1b2c3",
+ "status": "building"}
+{"error": "...", "detail": "...", "invalid_field": "deployed_name", "max_length": 49}
+```
+
 ### `/deploy_model` conflicts and `overwrite`
 
 `deployed_name` is normalized to a slug (`Churn_V2`, `churn-v2` and `churn v2` all give
@@ -140,6 +162,40 @@ resources applied by hand during a build, can still race; no distributed lock is
 
 > **Behaviour change:** before this check, a deploy whose slug matched an existing model
 > replaced it silently. Clients that relied on that must now pass `overwrite=true`.
+
+### Deleting: `/delete_model` and `/delete_operation`
+
+Both work on the resource name `bentloy-model-<slug>`, never on the raw `deployed_name`.
+
+- `POST /delete_model {"service_name"}` deletes the Deployment and the Service named
+  `service_name` (Deployment pods are removed by Kubernetes garbage collection), then the
+  image the Deployment ran. Only `<MODEL_SERVICE_PREFIX>-*` names are accepted, so it cannot
+  delete other workloads of the namespace (e.g. the gateway). Answers
+  `{"status": "success" | "partial_success" | "error", "message"}`.
+- `POST /delete_operation {"operation_id"}` sets the operation to `deleting` and, in the
+  background, deletes what that operation created, then removes it from the store
+  (`delete_failed` + `error` if something fails):
+  - the Deployment and the Service, **only if** their `bentloy.io/operation-id`
+    annotation is this operation. Every deploy writes it on the Deployment and Service
+    metadata (not on the pod template). If another operation owns them (a later
+    deploy with `overwrite=true`) or they have no annotation (deployed by an older
+    gateway), they are kept;
+  - its build Job;
+  - its image, under the rule below.
+
+**Images in use are kept.** The image name is `model-<model_name slug>:v<version>-r<run_id[:8]>`
+and does not depend on `deployed_name`, so several deployments of the same model and run
+share one image. Before deleting an image, the gateway lists the Deployments of the
+namespace and checks the operations still deploying (`queued`, `building`, `pushing`,
+`deploying`). If any of them uses the image, it is kept and the answer/log says who uses
+it; deleting that last user later deletes the image. The cost is one `LIST deployments`
+call per deletion (the RBAC already allows it), negligible next to the `crane` Job.
+`crane` deletes by `repo@digest`; tags of different builds never share a digest because
+kaniko builds are not reproducible (no `--reproducible`), so comparing image references is
+enough.
+
+Limits: only the target namespace is checked; the image a Deployment ran before an
+`overwrite=true` redeploy is not deleted by that redeploy (it stays in the registry).
 
 ## 4) Environment and config
 

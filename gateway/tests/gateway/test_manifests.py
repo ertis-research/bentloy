@@ -172,6 +172,7 @@ class ManifestBuildersTest(unittest.TestCase):
             run_id=run_id,
             source_model_uri=f"runs:/{run_id}/ludwig-model",
             experiment_name="Churn Prediction / EU",
+            operation_id="op_20261123101500_a1b2c3",
         )
         selector = {"app": "model-service", "model-slug": "tiny-demo-model"}
         expected_labels = {
@@ -185,7 +186,12 @@ class ManifestBuildersTest(unittest.TestCase):
         }
         # Version metadata on the resource and the pods, never in the immutable selector.
         self.assertEqual(manifest["metadata"]["labels"], expected_labels)
-        self.assertEqual(manifest["metadata"]["annotations"], expected_annotations)
+        # The owning operation is on the Deployment only: a pod-template change would
+        # restart the pods.
+        self.assertEqual(
+            manifest["metadata"]["annotations"],
+            {**expected_annotations, "bentloy.io/operation-id": "op_20261123101500_a1b2c3"},
+        )
         self.assertEqual(manifest["spec"]["selector"]["matchLabels"], selector)
         self.assertEqual(manifest["spec"]["template"]["metadata"]["labels"], expected_labels)
         self.assertEqual(
@@ -204,11 +210,13 @@ class ManifestBuildersTest(unittest.TestCase):
             run_id=run_id,
             source_model_uri=f"runs:/{run_id}/ludwig-model",
             experiment_name="X" * 80,
+            operation_id="op_1",
         )
         labels = manifest["metadata"]["labels"]
         self.assertEqual(labels["bentloy.io/run-id"], run_id)
         self.assertEqual(labels["bentloy.io/experiment"], "x" * 63)
         self.assertEqual(manifest["metadata"]["annotations"]["bentloy.io/experiment-name"], "X" * 80)
+        self.assertEqual(manifest["metadata"]["annotations"]["bentloy.io/operation-id"], "op_1")
         self.assertEqual(
             manifest["spec"]["selector"],
             {"app": "model-service", "model-slug": "tiny-demo-model"},
@@ -225,7 +233,11 @@ class ManifestBuildersTest(unittest.TestCase):
         self.assertEqual(manifest["metadata"]["labels"]["bentloy.io/experiment"], "")
         self.assertEqual(
             manifest["metadata"]["annotations"],
-            {"bentloy.io/model-uri": "", "bentloy.io/experiment-name": ""},
+            {
+                "bentloy.io/model-uri": "",
+                "bentloy.io/experiment-name": "",
+                "bentloy.io/operation-id": "",
+            },
         )
 
 

@@ -24,13 +24,27 @@ from .operation_store import DeployOperationStore
 from .orchestrator import DeployOrchestrator
 
 
-class DeployRequestError(Exception):
-    """A deploy request that cannot be queued; carries the HTTP status to answer with."""
+# Values of the `conflict` field in /deploy_model 409 answers.
+CONFLICT_EXISTS = "exists"
+CONFLICT_IN_PROGRESS = "in_progress"
 
-    def __init__(self, message: str, status_code: int = 400):
+K8S_NAME_MAX_LENGTH = 63
+
+
+class DeployRequestError(Exception):
+    """A deploy request that cannot be queued.
+
+    Carries the HTTP status to answer with and optional `extra` fields that the API
+    adds to `{"error", "detail"}` so clients can tell cases apart without parsing text.
+    """
+
+    def __init__(
+        self, message: str, status_code: int = 400, extra: dict[str, Any] | None = None
+    ):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+        self.extra = dict(extra or {})
 
 
 class DeployHandler:
@@ -141,13 +155,19 @@ class DeployHandler:
 
         if not model_slug:
             raise DeployRequestError("Invalid model_name. Could not generate slug.")
+        # Longest slug that keeps `<prefix>-<slug>` a valid Kubernetes name.
+        max_slug_length = K8S_NAME_MAX_LENGTH - len(self.model_service_prefix) - 1
+        invalid_name = {"invalid_field": "deployed_name", "max_length": max_slug_length}
         if not deployment_slug:
-            raise DeployRequestError("Invalid deployed_name. Could not generate slug.")
+            raise DeployRequestError(
+                "Invalid deployed_name. Could not generate slug.", extra=invalid_name
+            )
         resource_name = f"{self.model_service_prefix}-{deployment_slug}"
-        if len(resource_name) > 63:
+        if len(resource_name) > K8S_NAME_MAX_LENGTH:
             raise DeployRequestError(
                 f"deployed_name too long: Kubernetes resource '{resource_name}' would exceed "
-                f"63 characters (max {62 - len(self.model_service_prefix)} for the name)."
+                f"{K8S_NAME_MAX_LENGTH} characters (max {max_slug_length} for the name).",
+                extra=invalid_name,
             )
         if not is_valid_k8s_name(namespace):
             raise DeployRequestError(f"Invalid namespace '{namespace}'.")
@@ -249,9 +269,7 @@ class DeployHandler:
         # queued the same resource while we were reading Kubernetes.
         active = await self.operation_store.add_if_no_active(operation)
         if active is not None:
-            raise DeployRequestError(
-                self._in_progress_message(deployed_name, resource_name, active), 409
-            )
+            raise self._in_progress_error(deployed_name, resource_name, active)
         asyncio.create_task(self.deploy_orchestrator.run_operation(operation_id))
 
         return {
@@ -292,9 +310,7 @@ class DeployHandler:
 
         active = await self.operation_store.find_active(namespace, deployment_slug)
         if active is not None:
-            raise DeployRequestError(
-                self._in_progress_message(deployed_name, resource_name, active), 409
-            )
+            raise self._in_progress_error(deployed_name, resource_name, active)
         if overwrite:
             return
 
@@ -322,6 +338,12 @@ class DeployHandler:
             f"already used by {self._describe_owner(run_id, experiment, 'an existing deployment')}. "
             "Use another name or overwrite=true.",
             409,
+            extra={
+                "conflict": CONFLICT_EXISTS,
+                "resource_name": resource_name,
+                "run_id": run_id or None,
+                "experiment_name": experiment or None,
+            },
         )
 
     @staticmethod
@@ -331,18 +353,25 @@ class DeployHandler:
             owner += f" (experiment '{experiment_name}')"
         return owner
 
-    def _in_progress_message(
+    def _in_progress_error(
         self, deployed_name: str, resource_name: str, operation: DeployOperationRecord
-    ) -> str:
+    ) -> DeployRequestError:
         owner = self._describe_owner(
             operation.get("run_id") or "",
             operation.get("experiment_name") or "",
             f"deployed_name '{operation.get('deployed_name')}'",
         )
-        return (
+        return DeployRequestError(
             f"'{deployed_name}' maps to {resource_name}, which has an operation in progress "
             f"({operation['operation_id']}, status '{operation['status']}') for {owner}. "
-            "Wait until it finishes; overwrite=true cannot replace a deployment still in progress."
+            "Wait until it finishes; overwrite=true cannot replace a deployment still in progress.",
+            409,
+            extra={
+                "conflict": CONFLICT_IN_PROGRESS,
+                "resource_name": resource_name,
+                "operation_id": operation["operation_id"],
+                "status": operation["status"],
+            },
         )
 
     async def deploy_status(self, operation_id: str) -> dict[str, Any]:
@@ -409,10 +438,6 @@ class DeployHandler:
         if not operation:
             return
 
-        deployed_name = operation.get("deployed_name")
-        image_ref = operation.get("image_ref")
-        build_job_name = operation.get("k8s_job")
-        namespace = operation.get("namespace", self.model_namespace)
         # Reuse the settings the operation was built with (falls back to gateway defaults).
         request = operation.get("request") or {}
         registry_secret = request.get("registry_secret") or registry_secret
@@ -421,26 +446,12 @@ class DeployHandler:
         )
 
         try:
-            # 1. Delete Kubernetes Resources ONLY if we have a name
-            if deployed_name:
-                await self.deploy_orchestrator._delete_k8s_resources(deployed_name, build_job_name, namespace)
-            else:
-                print(f"Skipping K8s deletion for {operation_id}: No deployed_name found.")
-
-            # 2. Delete Registry Image
-            try:
-                if image_ref:
-                    await self.deploy_orchestrator._delete_registry_image(
-                        image_ref,
-                        namespace,
-                        deployed_name,
-                        registry_secret,
-                        insecure_registry_tls=insecure_registry_tls,
-                    )
-            except Exception as img_err:
-                print(f"Image not deleted: {img_err}")
-                
-            # 3. Mark as successfully deleted
+            notes = await self.deploy_orchestrator.delete_operation_resources(
+                operation,
+                registry_secret=registry_secret,
+                insecure_registry_tls=insecure_registry_tls,
+            )
+            print(f"Deleted operation {operation_id}: {' '.join(notes) or 'nothing to delete.'}")
             await operation_store.delete(operation_id)
 
         except Exception as e:

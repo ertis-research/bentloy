@@ -7,8 +7,10 @@ from typing import Any, Callable
 
 from ..domain.types import DeployOperationRecord
 
+# Statuses of an operation that will still build/apply its image.
+DEPLOYING_STATUSES = frozenset({"queued", "building", "pushing", "deploying"})
 # Statuses of an operation still acting on its model-service resources.
-ACTIVE_STATUSES = frozenset({"queued", "building", "pushing", "deploying", "deleting"})
+ACTIVE_STATUSES = DEPLOYING_STATUSES | {"deleting"}
 
 
 def _targets(operation: DeployOperationRecord, namespace: str, deployment_slug: str) -> bool:
@@ -77,6 +79,21 @@ class DeployOperationStore:
                 operation, namespace, deployment_slug
             ):
                 return operation
+        return None
+
+    async def find_deploying_image(
+        self, image_ref: str, exclude_operation_id: str = ""
+    ) -> DeployOperationRecord | None:
+        """Return a copy of another operation that is still deploying `image_ref`, if any."""
+
+        async with self._lock:
+            for operation in self._operations.values():
+                if (
+                    operation["operation_id"] != exclude_operation_id
+                    and operation.get("status") in DEPLOYING_STATUSES
+                    and operation.get("image_ref") == image_ref
+                ):
+                    return deepcopy(operation)
         return None
 
     async def get(self, operation_id: str) -> DeployOperationRecord | None:

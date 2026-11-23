@@ -691,8 +691,13 @@ def cmd_delete(args: argparse.Namespace, config: dict[str, str]) -> None:
     name = args.name.strip()
     service_name = name if name.startswith(f"{prefix}-") else f"{prefix}-{to_model_slug(name)}"
     with gateway_connection(config, args.gateway_url) as url:
-        call_gateway(url, "delete_model", {"service_name": service_name})
-    print(f"Delete requested for {service_name} (Deployment, Service and registry image).")
+        result = call_gateway(url, "delete_model", {"service_name": service_name})
+    if isinstance(result, dict) and result.get("status") == "error":
+        raise CliError(f"Delete failed: {result.get('message')}")
+    if isinstance(result, dict) and result.get("message"):
+        print(result["message"])
+    else:  # older gateways answer null
+        print(f"Delete requested for {service_name} (Deployment, Service and registry image).")
 
 
 # --------------------------------------------------------------------------- entry point
