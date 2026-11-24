@@ -331,10 +331,13 @@ Notes:
 ## 7) Tests
 
 ```bash
-python -m unittest discover -s gateway/tests -t .
-python -m unittest discover -s model_service/tests -t .
-python -m unittest discover -s tests -t .    # bentloy.py CLI
+python -m pytest                      # all suites (gateway, model_service, bentloy.py CLI)
+python -m pytest tests/gateway        # one suite (or a single test file)
+python -m pytest -k build_logs        # by name
 ```
 
-These cover internal contracts and module wiring. Cluster-level rollout still depends
+The tests live in `tests/`, in `gateway/`, `model_service/` and `cli/` subfolders that mirror
+the code. They are plain pytest functions: shared fixtures are in each `conftest.py`, fake
+classes in `fakes.py`, and the Kubernetes API is simulated with `httpx.MockTransport`. They cover
+internal contracts and module wiring. Cluster-level rollout still depends
 on registry, RBAC, and Kubernetes connectivity in your environment.

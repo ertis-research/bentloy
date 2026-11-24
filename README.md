@@ -84,9 +84,9 @@ through `GATEWAY_URL` if you set it in `.env`.
 ```bash
 py -3.12 -m venv .venv            # Linux/macOS: python3.12 -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
-python -m unittest discover -s gateway/tests -t .
-python -m unittest discover -s model_service/tests -t .
-python -m unittest discover -s tests -t .
+python -m pytest                      # all suites
+python -m pytest tests/gateway        # one suite (or a single test file)
+python -m pytest -k build_logs        # by name
 ```
 
 ## Common API calls
@@ -136,7 +136,7 @@ Use `deployed_name` as the `model_name` value in `/predict` when custom naming i
 | `gateway/` | API gateway service and deploy orchestration |
 | `model_service/` | BentoML model runtime (base image for per-model images) |
 | `k8s/templates/` | Gateway and registry-secret manifests rendered by `bentloy.py` (see `k8s/README.md`) |
-| `tests/` | Tests for `bentloy.py` |
+| `tests/` | pytest tests, mirroring the code: `gateway/`, `model_service/` and `cli/` (`bentloy.py`) |
 | `docs/` | Runbook and gateway technical docs |
 
 ## Documentation

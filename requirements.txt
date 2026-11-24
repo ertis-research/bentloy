@@ -2,9 +2,9 @@
 # Versions live in each service's requirements file, also used by its Dockerfile.
 #
 #   pip install -r requirements.txt
-#   python -m unittest discover -s gateway/tests -t .
-#   python -m unittest discover -s model_service/tests -t .
-#   python -m unittest discover -s tests -t .
+#   python -m pytest
 
 -r gateway/requirements.txt
 -r model_service/requirements.txt
+pytest==9.0.3
+pytest-asyncio==1.5.0

@@ -39,7 +39,7 @@ Bentloy is an API gateway and model-serving stack that deploys MLflow models on 
 | `model_service/` | Per-model BentoML runtime |
 | `k8s/templates/` | Gateway RBAC, ConfigMap, Deployment, Service; registry secret |
 | `docs/` | `gateway_technical.md` (API contracts), `runbook.md` (operations) |
-| `tests/` | CLI tests |
+| `tests/` | pytest tests mirroring the code: `gateway/`, `model_service/` and `cli/` (`bentloy.py`) |
 
 ## Commands
 
@@ -49,10 +49,10 @@ Python 3.12. Windows virtual environment in `.venv`.
 py -3.12 -m venv .venv
 .venv/Scripts/python.exe -m pip install -r requirements.txt
 
-# Tests (unittest, not pytest)
-.venv/Scripts/python.exe -m unittest discover -s gateway/tests -t .
-.venv/Scripts/python.exe -m unittest discover -s model_service/tests -t .
-.venv/Scripts/python.exe -m unittest discover -s tests -t .
+# Tests (pytest)
+.venv/Scripts/python.exe -m pytest                      # all suites
+.venv/Scripts/python.exe -m pytest tests/gateway        # one suite (or a single test file)
+.venv/Scripts/python.exe -m pytest -k build_logs         # by name
 
 # Deploy the gateway to the cluster
 python bentloy.py up            # --dry-run to preview
@@ -96,6 +96,6 @@ The main session orchestrates and verifies; it delegates the work to the project
 - **Size and structure**: keep functions short and focused, and modules cohesive. Split a module when it mixes responsibilities or grows hard to read, but do not create a file per function: group related code by responsibility, as in the existing `app/` subpackages.
 - **Readability over cleverness**: clear names, no dead code, comments explain *why*, not *what* the code already says.
 - **Errors**: request errors return `{"error": str, "detail": str}` with the HTTP status set on `ctx.response.status_code` (see `DeployRequestError`, `ListModelsRequestError`, `LogsRequestError`). Expected states are not errors. Kubernetes API failures map to 502.
-- **Tests**: every change comes with `unittest` tests (`IsolatedAsyncioTestCase` for async code). Mock the Kubernetes API with `httpx.MockTransport` injected through an `http_client_factory`. The full suite must pass.
+- **Tests**: every change comes with tests. Tests live in `tests/<component>/<package>/`, mirroring the code, and are written as pytest functions (classes only to group related tests, without inheritance). Shared setup goes in fixtures in `conftest.py` and fake classes in `fakes.py`; use `parametrize` for variants, `monkeypatch` and `tmp_path` instead of manual patching and temporary files, and `pytest-asyncio` in auto mode for async tests (no decorator needed). Every test and fixture has a one-line docstring. Mock the Kubernetes API with `httpx.MockTransport` injected through an `http_client_factory`. The full suite must pass.
 - **Docs**: update `docs/gateway_technical.md` (and `README.md` or `docs/runbook.md` when relevant) together with the code.
 - **RBAC**: the gateway Role is in `k8s/templates/gateway.yaml`; check it before relying on new Kubernetes permissions.

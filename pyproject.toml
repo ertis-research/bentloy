@@ -14,3 +14,14 @@ dependencies = [
     "pandas==2.3.3",
     "pyarrow<24",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["."]
+filterwarnings = [
+    # Third-party deprecations raised while bentoml / pathspec are imported.
+    "ignore:GitWildMatchPattern:DeprecationWarning:pathspec",
+    "ignore:The `__get_pydantic_core_schema__` method:DeprecationWarning:_bentoml_sdk",
+]
