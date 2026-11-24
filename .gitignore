@@ -8,8 +8,6 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-.claude/
-
 # Virtual environments and local tooling cache
 .venv/
 .uv-cache/
@@ -33,3 +31,7 @@ Thumbs.db
 history/
 phases/
 pasos.md
+
+# Local-only Claude Code files (never shared)
+CLAUDE.local.md
+.claude/settings.local.json
