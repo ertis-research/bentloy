@@ -1,13 +1,96 @@
 """Minimal Kubernetes API client operations used by deployment workflows."""
 
 import asyncio
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 
+class KubernetesApiError(RuntimeError):
+    """A Kubernetes API call that failed, with the HTTP status (0 for transport errors)."""
+
+    def __init__(self, message: str, status_code: int = 0):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+@dataclass(frozen=True)
+class PodLogResult:
+    """Outcome of a pod log read: the HTTP status and the response body."""
+
+    status_code: int
+    text: str
+
+
 class KubernetesApiClient:
     """Provide high-level async helpers over raw Kubernetes HTTP calls."""
+
+    async def list_pods(
+        self,
+        client: httpx.AsyncClient,
+        base_url: str,
+        headers: dict[str, str],
+        namespace: str,
+        label_selector: str,
+    ) -> list[dict[str, Any]]:
+        """Return the pods matching a label selector, newest first.
+
+        Raises KubernetesApiError when the call fails.
+        """
+
+        pods_url = f"{base_url}/api/v1/namespaces/{namespace}/pods"
+        try:
+            response = await client.get(
+                pods_url,
+                headers=headers,
+                params={"labelSelector": label_selector},
+            )
+        except httpx.HTTPError as exc:
+            raise KubernetesApiError(f"List pods failed: {exc}") from exc
+        if response.status_code != 200:
+            raise KubernetesApiError(
+                f"List pods failed ({response.status_code}): {response.text}",
+                response.status_code,
+            )
+
+        items = response.json().get("items", [])
+        items.sort(
+            key=lambda item: item.get("metadata", {}).get("creationTimestamp", ""),
+            reverse=True,
+        )
+        return items
+
+    async def read_pod_log(
+        self,
+        client: httpx.AsyncClient,
+        base_url: str,
+        headers: dict[str, str],
+        namespace: str,
+        pod_name: str,
+        container: str,
+        tail_lines: int,
+        previous: bool = False,
+    ) -> PodLogResult:
+        """Read the last `tail_lines` log lines of a pod container.
+
+        The caller tells 200 / 400 (container not started) / 404 (pod gone) apart by
+        `status_code`. Transport errors raise KubernetesApiError.
+        """
+
+        logs_url = f"{base_url}/api/v1/namespaces/{namespace}/pods/{pod_name}/log"
+        params: dict[str, Any] = {
+            "container": container,
+            "tailLines": tail_lines,
+            "timestamps": "false",
+        }
+        if previous:
+            params["previous"] = "true"
+        try:
+            response = await client.get(logs_url, headers=headers, params=params)
+        except httpx.HTTPError as exc:
+            raise KubernetesApiError(f"Read pod log failed: {exc}") from exc
+        return PodLogResult(status_code=response.status_code, text=response.text)
 
     async def get_job_pod_name(
         self,
@@ -19,23 +102,14 @@ class KubernetesApiClient:
     ) -> str | None:
         """Return the newest pod name created for a given Job, if available."""
 
-        pods_url = f"{base_url}/api/v1/namespaces/{namespace}/pods"
-        response = await client.get(
-            pods_url,
-            headers=headers,
-            params={"labelSelector": f"job-name={job_name}"},
-        )
-        if response.status_code != 200:
+        try:
+            items = await self.list_pods(
+                client, base_url, headers, namespace, f"job-name={job_name}"
+            )
+        except KubernetesApiError:
             return None
-
-        items = response.json().get("items", [])
         if not items:
             return None
-
-        items.sort(
-            key=lambda item: item.get("metadata", {}).get("creationTimestamp", ""),
-            reverse=True,
-        )
         return items[0].get("metadata", {}).get("name")
 
     async def read_job_logs(

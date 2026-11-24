@@ -14,6 +14,7 @@ try:
     from .app.deploy.operation_store import DeployOperationStore
     from .app.deploy.orchestrator import DeployOrchestrator
     from .app.handlers.info_handler import InfoHandler, ListModelsRequestError
+    from .app.handlers.logs_handler import LogsHandler, LogsRequestError
     from .app.handlers.predict_handler import PredictHandler
     from .app.kubernetes.auth import resolve_k8s_auth
     from .app.kubernetes.client import KubernetesApiClient
@@ -30,6 +31,7 @@ except ImportError:
     from app.deploy.operation_store import DeployOperationStore
     from app.deploy.orchestrator import DeployOrchestrator
     from app.handlers.info_handler import InfoHandler, ListModelsRequestError
+    from app.handlers.logs_handler import LogsHandler, LogsRequestError
     from app.handlers.predict_handler import PredictHandler
     from app.kubernetes.auth import resolve_k8s_auth
     from app.kubernetes.client import KubernetesApiClient
@@ -132,6 +134,14 @@ class GatewayService:
             model_discovery=self.model_discovery,
             operation_store=self.operation_store,
             resolve_k8s_auth=self._resolve_k8s_auth,
+        )
+
+        self.logs_handler = LogsHandler(
+            resolve_k8s_auth=self._resolve_k8s_auth,
+            k8s_client=self.k8s_client,
+            operation_store=self.operation_store,
+            model_namespace=self.model_namespace,
+            model_service_prefix=self.model_service_prefix,
         )
 
         logger.info("Configured models from env: %s", list(self.model_urls.keys()))
@@ -274,4 +284,44 @@ class GatewayService:
     async def delete_model(self, service_name: str) -> dict[str, Any]:
         """Delete a model's Deployment, Service and (if no one else uses it) image."""
         return await self.deploy_handler.delete_model(service_name)
-    
+
+    @bentoml.api
+    async def deployment_logs(
+        self,
+        service_name: str,
+        tail_lines: int = 500,
+        previous: bool = False,
+        ctx: bentoml.Context = None,
+    ) -> dict[str, Any]:
+        """Return the latest logs of a model's pod.
+
+        `tail_lines` is 1-5000; `previous` reads the previous (restarted) container.
+        Failures answer 400/404/502 with {"error": msg, "detail": msg}.
+        """
+
+        try:
+            return await self.logs_handler.deployment_logs(service_name, tail_lines, previous)
+        except LogsRequestError as exc:
+            if ctx is not None:
+                ctx.response.status_code = exc.status_code
+            return {"error": exc.message, "detail": exc.message}
+
+    @bentoml.api
+    async def build_logs(
+        self,
+        operation_id: str,
+        tail_lines: int = 500,
+        ctx: bentoml.Context = None,
+    ) -> dict[str, Any]:
+        """Return the logs of a deploy operation's build Job (both build containers).
+
+        Failures answer 400/404/502 with {"error": msg, "detail": msg}.
+        """
+
+        try:
+            return await self.logs_handler.build_logs(operation_id, tail_lines)
+        except LogsRequestError as exc:
+            if ctx is not None:
+                ctx.response.status_code = exc.status_code
+            return {"error": exc.message, "detail": exc.message}
+

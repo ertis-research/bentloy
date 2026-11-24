@@ -31,6 +31,7 @@ Current service entrypoint:
 - `deploy_model`, `deploy_status`: delegated to `DeployHandler`
 - `predict`, `batch_predict`: delegated to `PredictHandler`
 - `health`, `list_models`: delegated to `InfoHandler`
+- `deployment_logs`, `build_logs`: delegated to `LogsHandler` (`app/handlers/logs_handler.py`)
 
 ### 2.3 Deploy status lifecycle
 
@@ -57,6 +58,8 @@ Gateway keeps these endpoints:
 - `POST /list_models`
 - `POST /delete_model`
 - `POST /delete_operation`
+- `POST /deployment_logs`
+- `POST /build_logs`
 
 Compatibility objective remains: no payload/response contract break relative to the refactor baseline.
 
@@ -196,6 +199,98 @@ enough.
 
 Limits: only the target namespace is checked; the image a Deployment ran before an
 `overwrite=true` redeploy is not deleted by that redeploy (it stays in the registry).
+
+### Logs: `/deployment_logs` and `/build_logs`
+
+Both read logs from the Kubernetes API (pod `log` subresource) and never keep them.
+
+**`POST /deployment_logs {"service_name", "tail_lines"?, "previous"?}`** returns the logs of the
+newest pod (not terminating) of a model, container `model-service`.
+
+| Request field | Type | Default | Notes |
+|---|---|---|---|
+| `service_name` | string | required | `<MODEL_SERVICE_PREFIX>-<slug>`; other names answer `404` |
+| `tail_lines` | int | `500` | 1-5000, else `400` |
+| `previous` | bool | `false` | logs of the previous (restarted) container |
+
+| Response field | Type |
+|---|---|
+| `service_name` | string |
+| `pod_name`, `pod_phase` | string or `null` |
+| `container_ready` | bool |
+| `restart_count` | int |
+| `available` | bool |
+| `reason` | string or `null` (why `available` is `false`) |
+| `logs` | string (`""` when not available) |
+
+Cases with `200`:
+
+| Case | `available` | `reason` |
+|---|---|---|
+| Logs read | `true` | `null` |
+| Deployment with `spec.replicas == 0` | `false` | `The deployment is scaled to 0 replicas.` |
+| No pod found | `false` | `No running pod for this model yet.` |
+| Container not started (Kubernetes answers 400) | `false` | `The model pod is starting.` plus ` (<waiting reason>)` when known, e.g. `ContainerCreating` |
+| `previous=true`, container never restarted (`restart_count == 0`) | `false` | `No previous container: the container has not restarted.` |
+| `previous=true`, container restarted but Kubernetes has no previous logs | `false` | `The previous container's logs are not available.` |
+| Pod deleted while reading | `false` | `The model pod no longer exists.` |
+
+**`POST /build_logs {"operation_id", "tail_lines"?}`** returns the logs of the operation's build
+Job pod. `tail_lines` applies to each container.
+
+| Response field | Type |
+|---|---|
+| `operation_id` | string |
+| `job_name`, `pod_name`, `pod_phase` | string or `null` |
+| `step` | string or `null` (operation step: `queued`, `create_job`, `kaniko_push`, `apply_resources`, `rollout`, `completed`, `failed`) |
+| `available` | bool |
+| `reason` | string or `null` |
+| `logs` | string (`""` when not available) |
+
+Cases with `200`:
+
+| Case | `available` | `reason` |
+|---|---|---|
+| At least one container returned logs | `true` | `null` |
+| Operation `queued`, without Job, or Job not found while the step is `queued` / `create_job` (the name is stored at queue time, the Job is about to be created) | `false` | `The build job has not been created yet.` |
+| Job not found in any later step (removed 1 hour after finishing) | `false` | `The build job no longer exists (it is removed 1 hour after finishing); its logs are not kept.` |
+| Job without pod | `false` | `The build pod has not been created yet.` |
+| No container started | `false` | `The build pod is starting.` plus ` (<waiting reason>)`, e.g. `PodInitializing` |
+
+When available, `logs` has one section per container, in execution order
+(`prepare-build-context`, an init container, then `kaniko`), separated by a blank line:
+
+```
+===== prepare-build-context =====
+<log>
+
+===== kaniko =====
+<log>
+```
+
+A container that has not produced logs gets `(not started yet)` (with `: <waiting reason>` when
+known) or `(logs not available)` as its body.
+
+Errors answer `{"error": msg, "detail": msg}`:
+
+| Code | When |
+|---|---|
+| `400` | `tail_lines` outside 1-5000 |
+| `404` | Unknown `service_name` (not `<prefix>-<slug>` or no such Deployment) or unknown `operation_id` |
+| `502` | The Kubernetes API failed or could not be reached |
+
+```json
+{"service_name": "bentloy-model-churn-v2", "pod_name": "bentloy-model-churn-v2-7d9f-x2k4q",
+ "pod_phase": "Running", "container_ready": true, "restart_count": 0,
+ "available": true, "reason": null, "logs": "INFO: model loaded\n"}
+{"operation_id": "op_20261123101500_a1b2c3", "job_name": "bentloy-build-churn-v2-abc123",
+ "pod_name": null, "pod_phase": null, "step": "create_job", "available": false,
+ "reason": "The build pod has not been created yet.", "logs": ""}
+```
+
+The frontend polls these endpoints (about every 3 s) and replaces the whole text with each
+answer. Operations live in the gateway's memory: after a gateway restart an `operation_id` is
+unknown and `/build_logs` answers `404`.
 
 ## 4) Environment and config
 
